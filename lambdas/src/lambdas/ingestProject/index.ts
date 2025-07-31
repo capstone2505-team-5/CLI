@@ -92,29 +92,31 @@ export const processProjectIngestion = async (projectName: string, lastCursor: s
   }
 };
 
-export const handler = async (event: APIGatewayEvent, context: Context) => {
+interface CustomAPIGatewayEvent extends APIGatewayEvent {
+  projectName?: string;
+  lastCursor?: string;
+}
+
+export const handler = async (event: CustomAPIGatewayEvent, context: Context) => {
   let projectName = '';
   let lastCursor = '';
+  console.log(event);
 
-  // Parse the request body if present
-  if (event.body) {
-    try {
-      const parsedBody = JSON.parse(event.body);
-      console.log('Parsed body:', parsedBody);
-      projectName = parsedBody.projectName || '';
-      lastCursor = parsedBody.lastCursor || '';
-    } catch (parseError) {
-      console.error('Error parsing request body:', parseError);
-      return {
-        statusCode: 400,
-        body: JSON.stringify({ message: 'Invalid JSON in request body' }),
-        headers: { 'Content-Type': 'application/json' }
-      };
-    }
+  try {
+    projectName = event.projectName || '';
+    lastCursor = event.lastCursor || '';
+  } catch (parseError) {
+    console.error('Error parsing request body:', parseError);
+    return {
+      statusCode: 400,
+      body: JSON.stringify({ message: 'Invalid JSON in request body' }),
+      headers: { 'Content-Type': 'application/json' }
+    };
   }
 
   // Validate required parameters
   if (!projectName) {
+    console.error('projectName not found.')
     return {
       statusCode: 400,
       body: JSON.stringify({ message: 'projectName is required' }),

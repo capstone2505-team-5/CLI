@@ -8,6 +8,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as cr from "aws-cdk-lib/custom-resources";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 import inquirer from "inquirer";
 import { Command } from "commander";
@@ -79,6 +80,12 @@ export class AppDeploymentStack extends cdk.Stack {
       config
     );
 
+    // Create API secrets
+    const apiSecrets = this.createApiSecrets(config);
+
+    // Create shared Lambda security group
+    const lambdaSecurityGroup = this.createLambdaSecurityGroup(vpc);
+
     // Create EC2 instance with Docker
     const appInstance = this.createAppInstance(
       vpc,
@@ -93,6 +100,28 @@ export class AppDeploymentStack extends cdk.Stack {
       vpc,
       privateSubnetSelection,
       database,
+      lambdaSecurityGroup,
+      config
+    );
+
+    // Create Lambda function for getting all project root spans
+    const getAllProjectRootSpansLambda = this.createGetAllProjectRootSpansLambda(
+      vpc,
+      privateSubnetSelection,
+      database,
+      apiSecrets,
+      lambdaSecurityGroup,
+      config
+    );
+
+    // Create Lambda function for getting all projects
+    const getAllProjectsLambda = this.createGetAllProjectsLambda(
+      vpc,
+      privateSubnetSelection,
+      database,
+      apiSecrets,
+      getAllProjectRootSpansLambda,
+      lambdaSecurityGroup,
       config
     );
 
@@ -100,7 +129,7 @@ export class AppDeploymentStack extends cdk.Stack {
     this.triggerDbCreationLambda(dbCreationLambda, database);
 
     // Create outputs
-    this.createOutputs(config, appInstance, database, dbCreationLambda);
+    this.createOutputs(config, appInstance, database, dbCreationLambda, getAllProjectRootSpansLambda, getAllProjectsLambda, apiSecrets);
   }
 
   private createSecurityGroups(vpc: ec2.IVpc, config: DeploymentConfig) {
@@ -345,7 +374,10 @@ echo "DB User: $DB_USER"
     config: DeploymentConfig,
     appInstance: ec2.Instance,
     database: rds.DatabaseInstance,
-    dbCreationLambda?: lambda.Function
+    dbCreationLambda?: lambda.Function,
+    getAllProjectRootSpansLambda?: lambda.Function,
+    getAllProjectsLambda?: lambda.Function,
+    apiSecrets?: secretsmanager.Secret
   ) {
     new cdk.CfnOutput(this, "AppInstanceId", {
       value: appInstance.instanceId,
@@ -382,7 +414,7 @@ echo "DB User: $DB_USER"
       description: "How to access your application",
     });
 
-    // Add Lambda outputs if it exists
+    // Add Lambda outputs if they exist
     if (dbCreationLambda) {
       new cdk.CfnOutput(this, "RDSTableCreation", {
         value: dbCreationLambda.functionName,
@@ -394,21 +426,47 @@ echo "DB User: $DB_USER"
         description: "Database Creation Lambda Function ARN",
       });
     }
+
+    if (getAllProjectRootSpansLambda) {
+      new cdk.CfnOutput(this, "GetAllProjectRootSpans", {
+        value: getAllProjectRootSpansLambda.functionName,
+        description: "Gets all project root spans",
+      });
+
+      new cdk.CfnOutput(this, "GetAllProjectRootSpansArn", {
+        value: getAllProjectRootSpansLambda.functionArn,
+        description: "Get All Project Root Spans Lambda Function ARN",
+      });
+    }
+
+    if (getAllProjectsLambda) {
+      new cdk.CfnOutput(this, "GetAllProjects", {
+        value: getAllProjectsLambda.functionName,
+        description: "Gets all projects",
+      });
+
+      new cdk.CfnOutput(this, "GetAllProjectsArn", {
+        value: getAllProjectsLambda.functionArn,
+        description: "Get All Projects Lambda Function ARN",
+      });
+    }
+
+    // Add API secrets output
+    if (apiSecrets) {
+      new cdk.CfnOutput(this, "ApiSecretsArn", {
+        value: apiSecrets.secretArn,
+        description: "API Keys Secret ARN",
+      });
+    }
   }
 
   private createDbCreationLambda(
     vpc: ec2.IVpc,
     subnetSelection: ec2.SubnetSelection,
     database: rds.DatabaseInstance,
+    lambdaSecurityGroup: ec2.SecurityGroup,
     config: DeploymentConfig
   ): lambda.Function {
-    // Create security group for Lambda
-    const lambdaSecurityGroup = new ec2.SecurityGroup(this, "LambdaSecurityGroup", {
-      vpc,
-      description: "Security group for database creation Lambda",
-      allowAllOutbound: true,
-    });
-
     // Allow Lambda to access RDS
     database.connections.allowFrom(
       lambdaSecurityGroup,
@@ -448,7 +506,7 @@ echo "DB User: $DB_USER"
       securityGroups: [lambdaSecurityGroup],
       role: lambdaRole,
       environment: {
-        ERROR_ANALYSIS_SECRET_NAME: database.secret?.secretName || "error-analysis-app-db-credentials",
+        RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || "error-analysis-app-db-credentials",
         NODE_ENV: "production",
       },
       bundling: {
@@ -458,6 +516,133 @@ echo "DB User: $DB_USER"
     });
 
     return lambdaFunction;
+  }
+
+  private createGetAllProjectRootSpansLambda(
+    vpc: ec2.IVpc,
+    subnetSelection: ec2.SubnetSelection,
+    database: rds.DatabaseInstance,
+    apiSecrets: secretsmanager.Secret,
+    lambdaSecurityGroup: ec2.SecurityGroup,
+    config: DeploymentConfig
+  ): lambda.Function {
+    // Create IAM role for Lambda
+    const lambdaRole = new iam.Role(this, "GetAllProjectRootSpansLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("SecretsManagerReadWrite"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
+      ],
+    });
+
+    // Grant access to API secrets
+    apiSecrets.grantRead(lambdaRole);
+
+    // Create Lambda function
+    const lambdaFunction = new lambdaNodejs.NodejsFunction(this, "GetAllProjectRootSpansLambda", {
+      entry: path.join(__dirname, "./lambdas/src/lambdas/ingestProject/index.ts"),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(5),
+      vpc,
+      vpcSubnets: subnetSelection,
+      securityGroups: [lambdaSecurityGroup],
+      role: lambdaRole,
+      environment: {
+        NODE_ENV: "production",
+        PHOENIX_API_URL: config.phoenixApiUrl,
+        PHOENIX_API_KEY_SECRET_NAME: apiSecrets.secretName,
+        RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || "error-analysis-app-db-credentials",
+      },
+      bundling: {
+        minify: true,
+        sourceMap: true,
+      },
+    });
+
+    return lambdaFunction;
+  }
+
+  private createGetAllProjectsLambda(
+    vpc: ec2.IVpc,
+    subnetSelection: ec2.SubnetSelection,
+    database: rds.DatabaseInstance,
+    apiSecrets: secretsmanager.Secret,
+    getAllProjectRootSpansLambda: lambda.Function,
+    lambdaSecurityGroup: ec2.SecurityGroup,
+    config: DeploymentConfig
+  ): lambda.Function {
+    // Create IAM role for Lambda
+    const lambdaRole = new iam.Role(this, "GetAllProjectsLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("SecretsManagerReadWrite"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
+      ],
+    });
+
+    // Grant access to API secrets
+    apiSecrets.grantRead(lambdaRole);
+
+    // Add custom policy for invoking GetAllProjectRootSpans Lambda
+    const invokePolicy = new iam.Policy(this, "InvokeGetAllProjectRootSpansPolicy", {
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["lambda:InvokeFunction"],
+          resources: [getAllProjectRootSpansLambda.functionArn],
+        }),
+      ],
+    });
+    lambdaRole.attachInlinePolicy(invokePolicy);
+
+    // Create Lambda function
+    const lambdaFunction = new lambdaNodejs.NodejsFunction(this, "GetAllProjectsLambda", {
+      entry: path.join(__dirname, "./lambdas/src/lambdas/entry/index.ts"),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(5),
+      vpc,
+      vpcSubnets: subnetSelection,
+      securityGroups: [lambdaSecurityGroup],
+      role: lambdaRole,
+      environment: {
+        NODE_ENV: "production",
+        PHOENIX_API_URL: config.phoenixApiUrl,
+        PHOENIX_API_KEY_SECRET_NAME: apiSecrets.secretName,
+        SPAN_INGESTION_ARN: getAllProjectRootSpansLambda.functionArn,
+        RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || "error-analysis-app-db-credentials",
+      },
+      bundling: {
+        minify: true,
+        sourceMap: true,
+      },
+    });
+
+    return lambdaFunction;
+  }
+
+  private createLambdaSecurityGroup(vpc: ec2.IVpc): ec2.SecurityGroup {
+    // Create a shared security group for all Lambda functions
+    return new ec2.SecurityGroup(this, "LambdaSecurityGroup", {
+      vpc,
+      description: "Security group for Lambda functions",
+      allowAllOutbound: true,
+    });
+  }
+
+  private createApiSecrets(config: DeploymentConfig): secretsmanager.Secret {
+    // Create a secret for API keys
+    const apiSecret = new secretsmanager.Secret(this, "ApiKeysSecret", {
+      secretName: `${config.appName}-api-keys`,
+      description: "API keys for Error Analysis application",
+      secretStringValue: cdk.SecretValue.unsafePlainText(JSON.stringify({
+        openaiApiKey: config.openApiKey,
+        phoenixApiKey: config.phoenixApiKey,
+      })),
+    });
+
+    return apiSecret;
   }
 
   private triggerDbCreationLambda(lambdaFunction: lambda.Function, database: rds.DatabaseInstance) {

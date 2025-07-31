@@ -3,8 +3,8 @@ import { RDSSecrets } from "./types";
 
 const getRDSSecrets = async (): Promise<RDSSecrets> => {
 
-  const secret_name = process.env.ERROR_ANALYSIS_SECRET_NAME;
-  if (!secret_name) throw new Error("Missing ERROR_ANALYSIS_SECRET_NAME env variable");
+  const secret_name = process.env.RDS_CREDENTIALS_SECRET_NAME;
+  if (!secret_name) throw new Error("Missing RDS_CREDENTIALS_SECRET_NAME env variable");
 
   const client = new SecretsManagerClient({ region: process.env.AWS_REGION });
 

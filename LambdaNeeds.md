@@ -29,9 +29,10 @@ Configure timeout for each function
 
 *** GetAllProjects Lambda ***
 
-PHOENIX_API_KEY_SECRET_NAME=phoenix_api_key
-PHOENIX_API_URL=
-SPAN_INGESTION_FUNCTION_NAME=ARN of getAllProjectRootSpans lambda
+PHOENIX_API_KEY_SECRET_NAME=phoenix_api_key (gotten from secrets manager)
+PHOENIX_API_URL= (needs to be input as an environment variable)
+SPAN_INGESTION_FUNCTION_NAME=ARN of getAllProjectRootSpans lambda (needs to be configured in deployment after GetAllProjectRootSpans is created)
+
 
 *** GetAllProjectRootSpans Lambda ***
 
@@ -45,4 +46,4 @@ Target type: lambda
 Target: ARN of GetAllProjectsLambda
 Rate: 5 minutes
 
-I need to change the lambda code to retrieve the phoenix url from secrets.
+

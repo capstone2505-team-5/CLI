@@ -25,9 +25,9 @@ const getPhoenixKey = async (): Promise<string> => {
     if (!secret) throw new Error("SecretString is undefined");
 
     const parsedSecret = JSON.parse(secret);
-    if (!parsedSecret["PHOENIX_API_KEY"]) throw new Error("PHOENIX_API_KEY missing in Secrets Manager response");
+    if (!parsedSecret["phoenixApiKey"]) throw new Error("phoenixApiKey missing in Secrets Manager response");
 
-    return parsedSecret["PHOENIX_API_KEY"];
+    return parsedSecret["phoenixApiKey"];
 
   } catch (error) {
     console.error("Failed to fetch Phoenix API key", error);
