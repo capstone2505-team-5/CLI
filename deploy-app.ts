@@ -5,6 +5,8 @@ import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import { Construct } from "constructs";
 import inquirer from "inquirer";
 import { Command } from "commander";
@@ -12,6 +14,7 @@ import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import { exec } from "child_process";
 import { promisify } from "util";
+import * as path from 'path';
 
 const execAsync = promisify(exec);
 
@@ -84,8 +87,16 @@ export class AppDeploymentStack extends cdk.Stack {
       config
     );
 
+    // Create Lambda function for database creation
+    const dbCreationLambda = this.createDbCreationLambda(
+      vpc,
+      privateSubnetSelection,
+      database,
+      config
+    );
+
     // Create outputs
-    this.createOutputs(config, appInstance, database);
+    this.createOutputs(config, appInstance, database, dbCreationLambda);
   }
 
   private createSecurityGroups(vpc: ec2.IVpc, config: DeploymentConfig) {
@@ -329,7 +340,8 @@ echo "DB User: $DB_USER"
   private createOutputs(
     config: DeploymentConfig,
     appInstance: ec2.Instance,
-    database: rds.DatabaseInstance
+    database: rds.DatabaseInstance,
+    dbCreationLambda?: lambda.Function
   ) {
     new cdk.CfnOutput(this, "AppInstanceId", {
       value: appInstance.instanceId,
@@ -365,6 +377,83 @@ echo "DB User: $DB_USER"
       ].join(" | "),
       description: "How to access your application",
     });
+
+    // Add Lambda outputs if it exists
+    if (dbCreationLambda) {
+      new cdk.CfnOutput(this, "RDSTableCreation", {
+        value: dbCreationLambda.functionName,
+        description: "Creates RDS tables",
+      });
+
+      new cdk.CfnOutput(this, "RDSTableCreationArn", {
+        value: dbCreationLambda.functionArn,
+        description: "Database Creation Lambda Function ARN",
+      });
+    }
+  }
+
+  private createDbCreationLambda(
+    vpc: ec2.IVpc,
+    subnetSelection: ec2.SubnetSelection,
+    database: rds.DatabaseInstance,
+    config: DeploymentConfig
+  ): lambda.Function {
+    // Create security group for Lambda
+    const lambdaSecurityGroup = new ec2.SecurityGroup(this, "LambdaSecurityGroup", {
+      vpc,
+      description: "Security group for database creation Lambda",
+      allowAllOutbound: true,
+    });
+
+    // Allow Lambda to access RDS
+    database.connections.allowFrom(
+      lambdaSecurityGroup,
+      ec2.Port.tcp(5432),
+      "Allow Lambda to access RDS"
+    );
+
+    // Create IAM role for Lambda
+    const lambdaRole = new iam.Role(this, "DbCreationLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("SecretsManagerReadWrite"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
+      ],
+    });
+
+    // Add custom policy for GetProjectRootSpans Lambda invocation
+    const invokePolicy = new iam.Policy(this, "InvokeGetProjectRootSpansPolicy", {
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["lambda:InvokeFunction"],
+          resources: ["arn:aws:lambda:*:*:function:GetProjectRootSpans"],
+        }),
+      ],
+    });
+    lambdaRole.attachInlinePolicy(invokePolicy);
+
+    // Create Lambda function
+    const lambdaFunction = new lambdaNodejs.NodejsFunction(this, "DbCreationLambda", {
+      entry: path.join(__dirname, "./lambdas/src/lambdas/dbCreation/index.ts"),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(30),
+      vpc,
+      vpcSubnets: subnetSelection,
+      securityGroups: [lambdaSecurityGroup],
+      role: lambdaRole,
+      environment: {
+        ERROR_ANALYSIS_SECRET_NAME: database.secret?.secretName || "",
+        NODE_ENV: "production",
+      },
+      bundling: {
+        minify: true,
+        sourceMap: true,
+      },
+    });
+
+    return lambdaFunction;
   }
 }
 
@@ -402,7 +491,8 @@ class DeploymentCLI {
     console.log(`🔒 Private Subnets: Auto-detected from VPC`);
     console.log(`🔐 VPN CIDR Blocks: ${config.vpnCidrBlocks.join(", ")}`);
     console.log(`🐳 Docker Image: docker.io/joshcutts/error-analysis-app:latest`);
-    console.log(`🔑 API Keys: OpenAI ✓, Phoenix ✓\n`);
+    console.log(`🔑 API Keys: OpenAI ✓, Phoenix ✓`);
+    console.log(`⚡ Lambda: Database Creation (Node.js 22.x, 30s timeout)\n`);
 
     const proceed = await inquirer.prompt([
       {

@@ -13,16 +13,18 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.100.0",
-    "constructs": "^10.0.0",
+    "@aws-cdk/aws-lambda-nodejs": "^1.203.0",
+    "@types/inquirer": "^9.0.0",
+    "aws-cdk-lib": "^2.208.0",
     "commander": "^11.0.0",
-    "inquirer": "^9.2.0",
-    "@types/inquirer": "^9.0.0"
+    "constructs": "^10.4.2",
+    "inquirer": "^9.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.5.0",
-    "typescript": "^5.1.6",
-    "ts-node": "^10.9.0"
+    "esbuild": "^0.25.8",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.1.6"
   },
   "keywords": [
     "aws",
