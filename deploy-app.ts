@@ -7,6 +7,7 @@ import * as rds from "aws-cdk-lib/aws-rds";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
+import * as cr from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 import inquirer from "inquirer";
 import { Command } from "commander";
@@ -94,6 +95,9 @@ export class AppDeploymentStack extends cdk.Stack {
       database,
       config
     );
+
+    // Trigger Lambda function at the end of deployment
+    this.triggerDbCreationLambda(dbCreationLambda, database);
 
     // Create outputs
     this.createOutputs(config, appInstance, database, dbCreationLambda);
@@ -444,7 +448,7 @@ echo "DB User: $DB_USER"
       securityGroups: [lambdaSecurityGroup],
       role: lambdaRole,
       environment: {
-        ERROR_ANALYSIS_SECRET_NAME: database.secret?.secretName || "",
+        ERROR_ANALYSIS_SECRET_NAME: database.secret?.secretName || "error-analysis-app-db-credentials",
         NODE_ENV: "production",
       },
       bundling: {
@@ -454,6 +458,36 @@ echo "DB User: $DB_USER"
     });
 
     return lambdaFunction;
+  }
+
+  private triggerDbCreationLambda(lambdaFunction: lambda.Function, database: rds.DatabaseInstance) {
+    // Create a custom resource that invokes the Lambda function only on create
+    const trigger = new cr.AwsCustomResource(this, "DbCreationTrigger", {
+      onCreate: {
+        service: "Lambda",
+        action: "invoke",
+        parameters: {
+          FunctionName: lambdaFunction.functionName,
+          InvocationType: "RequestResponse",
+          Payload: JSON.stringify({
+            action: "CREATE",
+            timestamp: new Date().toISOString(),
+          }),
+        },
+        physicalResourceId: cr.PhysicalResourceId.of("DbCreationTrigger"),
+      },
+      // No onUpdate - only run on initial creation
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [lambdaFunction.functionArn],
+        }),
+      ]),
+    });
+
+    // Ensure the trigger waits for the database to be ready
+    trigger.node.addDependency(database);
   }
 }
 
