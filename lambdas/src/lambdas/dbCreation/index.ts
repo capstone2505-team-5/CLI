@@ -78,7 +78,11 @@ export const handler = async () => {
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ message: 'Database tables dropped and recreated successfully' }),
+      body: JSON.stringify({ 
+        message: 'Database tables dropped and recreated successfully',
+        timestamp: new Date().toISOString(),
+        tablesCreated: ['projects', 'batches', 'root_spans', 'annotations', 'categories', 'annotation_categories']
+      }),
       headers: {
         'Content-Type': 'application/json',
       },

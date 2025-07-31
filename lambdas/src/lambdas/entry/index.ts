@@ -5,7 +5,7 @@ import createDbClient from "../../shared/createDbClient.js"
 import fetchProjects from "./fetchProjects/fetchProjects.js";
 import insertProjects from "./RDS/insertProjects.js";
 
-const lambdaClient = new LambdaClient({ region: "us-west-2" });
+const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION });
 
 export const handler = async (event: APIGatewayEvent) => {
   let client;

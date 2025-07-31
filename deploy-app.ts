@@ -9,6 +9,8 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import { Construct } from "constructs";
 import inquirer from "inquirer";
 import { Command } from "commander";
@@ -94,16 +96,7 @@ export class AppDeploymentStack extends cdk.Stack {
       database,
       config
     );
-
-    // Create Lambda function for database creation
-    const dbCreationLambda = this.createDbCreationLambda(
-      vpc,
-      privateSubnetSelection,
-      database,
-      lambdaSecurityGroup,
-      config
-    );
-
+    
     // Create Lambda function for getting all project root spans
     const getAllProjectRootSpansLambda = this.createGetAllProjectRootSpansLambda(
       vpc,
@@ -125,8 +118,20 @@ export class AppDeploymentStack extends cdk.Stack {
       config
     );
 
+    // Create Lambda function for database creation
+    const dbCreationLambda = this.createDbCreationLambda(
+      vpc,
+      privateSubnetSelection,
+      database,
+      lambdaSecurityGroup,
+      config
+    );
+
     // Trigger Lambda function at the end of deployment
-    this.triggerDbCreationLambda(dbCreationLambda, database);
+    this.triggerDbCreationLambda(dbCreationLambda, database, getAllProjectsLambda);
+
+    // Create CloudWatch rules for data population
+    this.createDataPopulationRules(getAllProjectsLambda, database, dbCreationLambda);
 
     // Create outputs
     this.createOutputs(config, appInstance, database, dbCreationLambda, getAllProjectRootSpansLambda, getAllProjectsLambda, apiSecrets);
@@ -645,7 +650,21 @@ echo "DB User: $DB_USER"
     return apiSecret;
   }
 
-  private triggerDbCreationLambda(lambdaFunction: lambda.Function, database: rds.DatabaseInstance) {
+  private createDataPopulationRules(getAllProjectsLambda: lambda.Function, database: rds.DatabaseInstance, dbCreationLambda: lambda.Function) {
+    // Ongoing updates - runs every 5 minutes
+    // Note: targets.LambdaFunction automatically creates the necessary permissions
+    const ongoingRule = new events.Rule(this, "OngoingDataUpdatesRule", {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(getAllProjectsLambda)],
+      description: "Ongoing data updates every 5 minutes",
+    });
+
+    // Ensure ongoing rule waits for database and Lambda to be ready
+    ongoingRule.node.addDependency(database);
+    ongoingRule.node.addDependency(getAllProjectsLambda);
+  }
+
+  private triggerDbCreationLambda(lambdaFunction: lambda.Function, database: rds.DatabaseInstance, getAllProjectsLambda?: lambda.Function) {
     // Create a custom resource that invokes the Lambda function only on create
     const trigger = new cr.AwsCustomResource(this, "DbCreationTrigger", {
       onCreate: {
@@ -673,6 +692,35 @@ echo "DB User: $DB_USER"
 
     // Ensure the trigger waits for the database to be ready
     trigger.node.addDependency(database);
+
+    // If getAllProjectsLambda is provided, trigger initial data load after DB creation
+    if (getAllProjectsLambda) {
+      const initialDataLoadTrigger = new cr.AwsCustomResource(this, "InitialDataLoadTrigger", {
+        onCreate: {
+          service: "Lambda",
+          action: "invoke",
+          parameters: {
+            FunctionName: getAllProjectsLambda.functionName,
+            InvocationType: "Event", // Asynchronous
+            Payload: JSON.stringify({
+              action: "INITIAL_LOAD",
+              timestamp: new Date().toISOString(),
+            }),
+          },
+          physicalResourceId: cr.PhysicalResourceId.of("InitialDataLoadTrigger"),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: ["lambda:InvokeFunction"],
+            resources: [getAllProjectsLambda.functionArn],
+          }),
+        ]),
+      });
+
+      // Ensure initial data load waits for DB creation to complete
+      initialDataLoadTrigger.node.addDependency(trigger);
+    }
   }
 }
 
