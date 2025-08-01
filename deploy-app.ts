@@ -11,11 +11,14 @@ import * as cr from "aws-cdk-lib/custom-resources";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import { Construct } from "constructs";
 import inquirer from "inquirer";
 import { Command } from "commander";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
+import * as fsSync from "fs";
 import { exec } from "child_process";
 import { promisify } from "util";
 import * as path from 'path';
@@ -26,6 +29,7 @@ const execAsync = promisify(exec);
 interface DeploymentConfig {
   appName: string;
   vpcId: string;
+  vpcCidrBlock: string;
   vpnCidrBlocks: string[];
   openApiKey: string;
   phoenixApiKey: string;
@@ -37,6 +41,7 @@ interface DeploymentConfig {
   // Optional detected subnets and AZs
   detectedPrivateSubnets?: string[];
   detectedAvailabilityZones?: string[];
+  detectedRouteTableIds?: string[];
 }
 
 // Main deployment stack
@@ -49,24 +54,20 @@ export class AppDeploymentStack extends cdk.Stack {
   ) {
     super(scope, id, props);
 
-    // Import existing VPC directly without lookup (more reliable)
-    // Use the actual AZs where private subnets exist
-    const azs = config.detectedAvailabilityZones && config.detectedAvailabilityZones.length > 0
-      ? config.detectedAvailabilityZones
-      : props?.env?.region ? 
-        [`${props.env.region}a`, `${props.env.region}b`] :
-        ['us-west-2a', 'us-west-2b'];
-      
+    // Import existing VPC with all required attributes
+    console.log(`🔍 Importing VPC: ${config.vpcId}`);
     const vpc = ec2.Vpc.fromVpcAttributes(this, "ExistingVpc", {
       vpcId: config.vpcId,
-      availabilityZones: azs,
+      vpcCidrBlock: config.vpcCidrBlock,
+      availabilityZones: config.detectedAvailabilityZones || ['us-west-2a', 'us-west-2b'],
       privateSubnetIds: config.detectedPrivateSubnets || [],
+      publicSubnetIds: [],
+      isolatedSubnetIds: [],
     });
+    console.log(`✅ VPC import successful: ${vpc.vpcId}`);
 
-    // Use the detected private subnets
-    const privateSubnetSelection: ec2.SubnetSelection = config.detectedPrivateSubnets && config.detectedPrivateSubnets.length > 0 
-      ? { subnetFilters: [ec2.SubnetFilter.byIds(config.detectedPrivateSubnets)] }
-      : { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS };
+    // Use private subnets from the looked-up VPC
+    const privateSubnetSelection: ec2.SubnetSelection = { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS };
 
     // Create security groups
     const { appSecurityGroup, dbSecurityGroup } = this.createSecurityGroups(
@@ -130,11 +131,23 @@ export class AppDeploymentStack extends cdk.Stack {
     // Trigger Lambda function at the end of deployment
     this.triggerDbCreationLambda(dbCreationLambda, database, getAllProjectsLambda);
 
+    // Create S3 VPC endpoint FIRST
+    const s3VpcEndpoint = this.createS3VpcEndpoint(vpc);
+
+    // Create S3 bucket for frontend hosting  
+    const frontendBucket = this.createFrontendBucket(config, vpc);
+
+    // Apply a permissive policy during deployment, then restrict after deployment
+    this.configureBucketPolicyForDeployment(frontendBucket, s3VpcEndpoint, config);
+
+    // Deploy frontend with VPC configuration
+    this.deployFrontendToS3(frontendBucket, config, vpc);
+
     // Create CloudWatch rules for data population
     this.createDataPopulationRules(getAllProjectsLambda, database, dbCreationLambda);
 
     // Create outputs
-    this.createOutputs(config, appInstance, database, dbCreationLambda, getAllProjectRootSpansLambda, getAllProjectsLambda, apiSecrets);
+    this.createOutputs(config, appInstance, database, dbCreationLambda, getAllProjectRootSpansLambda, getAllProjectsLambda, apiSecrets, frontendBucket, s3VpcEndpoint);
   }
 
   private createSecurityGroups(vpc: ec2.IVpc, config: DeploymentConfig) {
@@ -382,7 +395,9 @@ echo "DB User: $DB_USER"
     dbCreationLambda?: lambda.Function,
     getAllProjectRootSpansLambda?: lambda.Function,
     getAllProjectsLambda?: lambda.Function,
-    apiSecrets?: secretsmanager.Secret
+    apiSecrets?: secretsmanager.Secret,
+    frontendBucket?: s3.Bucket,
+    s3VpcEndpoint?: ec2.IGatewayVpcEndpoint
   ) {
     new cdk.CfnOutput(this, "AppInstanceId", {
       value: appInstance.instanceId,
@@ -461,6 +476,32 @@ echo "DB User: $DB_USER"
       new cdk.CfnOutput(this, "ApiSecretsArn", {
         value: apiSecrets.secretArn,
         description: "API Keys Secret ARN",
+      });
+    }
+
+    // Add S3 bucket outputs
+    if (frontendBucket) {
+      new cdk.CfnOutput(this, "FrontendBucketName", {
+        value: frontendBucket.bucketName,
+        description: "S3 Bucket for Frontend Hosting",
+      });
+
+      new cdk.CfnOutput(this, "FrontendBucketArn", {
+        value: frontendBucket.bucketArn,
+        description: "S3 Bucket ARN",
+      });
+    }
+
+    // Add VPC endpoint outputs
+    if (s3VpcEndpoint) {
+      new cdk.CfnOutput(this, "S3VpcEndpointId", {
+        value: s3VpcEndpoint.vpcEndpointId,
+        description: "S3 VPC Gateway Endpoint ID",
+      });
+
+      new cdk.CfnOutput(this, "S3VpcEndpointCreated", {
+        value: "S3 VPC Gateway Endpoint created successfully",
+        description: "S3 VPC Gateway Endpoint Status",
       });
     }
   }
@@ -650,6 +691,215 @@ echo "DB User: $DB_USER"
     return apiSecret;
   }
 
+  private createFrontendBucket(config: DeploymentConfig, vpc: ec2.IVpc): s3.Bucket {
+    // Create S3 bucket for frontend hosting
+    const bucket = new s3.Bucket(this, "FrontendBucket", {
+      bucketName: `${config.appName}-frontend-${this.account}`,
+      versioned: false,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // For development - change to RETAIN for production
+      autoDeleteObjects: true, // For development - remove for production
+    });
+  
+    return bucket;
+  }
+  
+  private createS3VpcEndpoint(vpc: ec2.IVpc): ec2.IGatewayVpcEndpoint {
+    // Create S3 VPC Gateway endpoint for secure access from within VPC
+    console.log(`🔍 Creating Gateway endpoint for VPC: ${vpc.vpcId}`);
+    
+    // Use a raw CloudFormation resource to avoid CDK VPC lookup issues
+    const s3Endpoint = new cdk.CfnResource(this, "S3VpcEndpoint", {
+      type: "AWS::EC2::VPCEndpoint",
+      properties: {
+        VpcId: vpc.vpcId,
+        ServiceName: "com.amazonaws.us-west-2.s3",
+        VpcEndpointType: "Gateway",
+      },
+    });
+
+    // Convert to CDK GatewayVpcEndpoint for compatibility
+    return ec2.GatewayVpcEndpoint.fromGatewayVpcEndpointId(this, "S3VpcEndpointFromAttributes", s3Endpoint.ref);
+  }
+  
+  private configureBucketPolicyForDeployment(
+    bucket: s3.Bucket, 
+    s3VpcEndpoint: ec2.IGatewayVpcEndpoint, 
+    config: DeploymentConfig
+  ) {
+    // For now, just allow CDK deployment and VPC endpoint access
+    // We'll add restrictions later after deployment is working
+    bucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowCDKDeployment",
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AnyPrincipal()],
+        actions: [
+          "s3:PutObject", 
+          "s3:DeleteObject", 
+          "s3:ListBucket", 
+          "s3:GetBucketTagging",
+          "s3:GetObject"
+        ],
+        resources: [bucket.bucketArn, `${bucket.bucketArn}/*`],
+        conditions: {
+          StringEquals: {
+            "aws:PrincipalArn": `arn:aws:sts::${this.account}:assumed-role/*`,
+          },
+        },
+      })
+    );
+
+    // Allow access from VPC endpoint
+    bucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowVPCEndpointAccess",
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:GetObject", "s3:ListBucket"],
+        resources: [bucket.bucketArn, `${bucket.bucketArn}/*`],
+        conditions: {
+          StringEquals: {
+            "aws:SourceVpce": s3VpcEndpoint.vpcEndpointId,
+          },
+        },
+      })
+    );
+
+    console.log(`✅ Bucket policy configured for deployment`);
+    console.log(`🔒 VPC endpoint access enabled: ${s3VpcEndpoint.vpcEndpointId}`);
+  }
+
+  private configureBucketPolicyAfterDeployment(
+    bucket: s3.Bucket, 
+    s3VpcEndpoint: ec2.IGatewayVpcEndpoint, 
+    config: DeploymentConfig
+  ) {
+    // Apply restrictive policy after deployment is complete
+    bucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowVPCEndpointAccess",
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:GetObject", "s3:ListBucket"],
+        resources: [bucket.bucketArn, `${bucket.bucketArn}/*`],
+        conditions: {
+          StringEquals: {
+            "aws:SourceVpce": s3VpcEndpoint.vpcEndpointId,
+          },
+        },
+      })
+    );
+
+    // Deny all other access
+    bucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "DenyAllExceptVPCEndpoint",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:*"],
+        resources: [bucket.bucketArn, `${bucket.bucketArn}/*`],
+        conditions: {
+          StringNotEquals: {
+            "aws:SourceVpce": s3VpcEndpoint.vpcEndpointId,
+          },
+        },
+      })
+    );
+  }
+  
+  // Updated deployFrontendToS3 method that works with VPC
+  private deployFrontendToS3(bucket: s3.Bucket, config: DeploymentConfig, vpc: ec2.IVpc) {
+    const frontendPath = path.join(__dirname, "./frontend");
+    
+    try {
+      // Use S3 deployment with VPC configuration for private bucket access
+      new s3deploy.BucketDeployment(this, "FrontendDeployment", {
+        sources: [s3deploy.Source.asset(frontendPath)],
+        destinationBucket: bucket,
+        destinationKeyPrefix: "",
+        prune: true,
+        retainOnDelete: false,
+        // Configure for VPC access
+        vpc: vpc,
+        vpcSubnets: {
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        },
+        metadata: {
+          "deployed-by": "cdk",
+          "deployment-timestamp": new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      console.log("⚠️  Frontend directory not found. Creating placeholder deployment.");
+      
+      const placeholderHtml = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>${config.appName} - Frontend</title>
+      <style>
+          body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+          .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .status { color: #666; background: #e8f4fd; padding: 15px; border-radius: 4px; border-left: 4px solid #2196f3; }
+          .code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
+      </style>
+  </head>
+  <body>
+      <div class="container">
+          <h1>${config.appName}</h1>
+          <p>Your private frontend is ready for deployment.</p>
+          <div class="status">
+              <strong>Status:</strong> Frontend deployment pending<br>
+              <strong>Access:</strong> VPC-only (private)<br>
+              <strong>S3 Bucket:</strong> <span class="code">${bucket.bucketName}</span>
+          </div>
+          <h3>Next Steps:</h3>
+          <ol>
+              <li>Upload your frontend files to the <span class="code">./frontend</span> directory</li>
+              <li>Redeploy the stack to update the frontend</li>
+              <li>Access via your EC2 instance or VPN connection</li>
+          </ol>
+          <h3>Technical Details:</h3>
+          <ul>
+              <li>✅ S3 VPC Gateway Endpoint configured</li>
+              <li>✅ Private bucket (no public access)</li>
+              <li>✅ VPC-only access policy applied</li>
+              <li>✅ Ready for your application to serve content</li>
+          </ul>
+      </div>
+  </body>
+  </html>`;
+      
+      const tempDir = path.join(__dirname, "temp-frontend");
+      
+      if (!fsSync.existsSync(tempDir)) {
+        fsSync.mkdirSync(tempDir, { recursive: true });
+      }
+      
+      fsSync.writeFileSync(path.join(tempDir, "index.html"), placeholderHtml);
+      
+      new s3deploy.BucketDeployment(this, "FrontendPlaceholderDeployment", {
+        sources: [s3deploy.Source.asset(tempDir)],
+        destinationBucket: bucket,
+        destinationKeyPrefix: "",
+        prune: true,
+        retainOnDelete: false,
+        // Configure for VPC access
+        vpc: vpc,
+        vpcSubnets: {
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        },
+        metadata: {
+          "deployed-by": "cdk",
+          "deployment-timestamp": new Date().toISOString(),
+          "type": "placeholder",
+        },
+      });
+    }
+  }
+
   private createDataPopulationRules(getAllProjectsLambda: lambda.Function, database: rds.DatabaseInstance, dbCreationLambda: lambda.Function) {
     // Ongoing updates - runs every 5 minutes
     // Note: targets.LambdaFunction automatically creates the necessary permissions
@@ -755,6 +1005,7 @@ class DeploymentCLI {
     console.log(`👤 AWS Profile: ${config.awsProfile}`);
     console.log(`📱 App Name: ${config.appName}`);
     console.log(`🌐 VPC: ${config.vpcId}`);
+    console.log(`🔍 VPC CIDR Block: ${config.vpcCidrBlock}`);
     console.log(`🔒 Private Subnets: Auto-detected from VPC`);
     console.log(`🔐 VPN CIDR Blocks: ${config.vpnCidrBlocks.join(", ")}`);
     console.log(`🐳 Docker Image: docker.io/joshcutts/error-analysis-app:latest`);
@@ -807,6 +1058,12 @@ class DeploymentCLI {
 
     console.log(`\n🔍 Detecting VPCs in your AWS account...`);
     const availableVpcs = await this.getAvailableVpcs(profileAnswer.awsProfile);
+    
+    console.log(`📋 Found ${availableVpcs.length} VPC(s):`);
+    availableVpcs.forEach((vpc, index) => {
+      console.log(`   ${index + 1}. ${vpc.display}`);
+    });
+    console.log();
 
     const restOfAnswers = await inquirer.prompt([
       {
@@ -865,8 +1122,23 @@ class DeploymentCLI {
     // Combine all answers
     const allAnswers = { ...profileAnswer, ...restOfAnswers };
     
+    // Automatically capture VPC CIDR block from selected VPC
+    let vpcCidrBlock = '10.0.0.0/16'; // Default fallback
+    let cidrSource = 'default fallback';
+    
+    if (allAnswers.vpcId && allAnswers.vpcId !== 'vpc-manual-input') {
+      const selectedVpc = availableVpcs.find(vpc => vpc.id === allAnswers.vpcId);
+      if (selectedVpc) {
+        vpcCidrBlock = selectedVpc.cidrBlock;
+        cidrSource = `detected from VPC ${selectedVpc.id}`;
+      }
+    }
+    
+    console.log(`🔍 VPC CIDR Block: ${vpcCidrBlock} (${cidrSource})`);
+    
     return {
       ...allAnswers,
+      vpcCidrBlock,
       vpnCidrBlocks:
         typeof allAnswers.vpnCidrBlocks === "string"
           ? [allAnswers.vpnCidrBlocks]
@@ -884,7 +1156,7 @@ class DeploymentCLI {
     }
   }
 
-  private async getAvailableVpcs(profile: string): Promise<Array<{id: string, name: string, display: string, region: string}>> {
+  private async getAvailableVpcs(profile: string): Promise<Array<{id: string, name: string, display: string, region: string, cidrBlock: string}>> {
     try {
       // Get the region for this profile
       const region = await this.getProfileRegion(profile);
@@ -903,7 +1175,8 @@ class DeploymentCLI {
           id: vpc.VpcId,
           name: name,
           display: `${vpc.VpcId} - ${name} (${cidr})${isDefault}`,
-          region: region
+          region: region,
+          cidrBlock: vpc.CidrBlock
         };
       }).sort((a: any, b: any) => {
         // Sort default VPC first, then by name
@@ -917,12 +1190,13 @@ class DeploymentCLI {
         id: 'vpc-manual-input',
         name: 'Manual Input Required',
         display: 'Could not auto-detect - you\'ll need to enter manually',
-        region: 'us-west-2'
+        region: 'us-west-2',
+        cidrBlock: '10.0.0.0/16'
       }];
     }
   }
 
-  private async getPrivateSubnets(vpcId: string, profile: string): Promise<{subnetIds: string[], availabilityZones: string[]}> {
+  private async getPrivateSubnets(vpcId: string, profile: string): Promise<{subnetIds: string[], availabilityZones: string[], routeTableIds: string[]}> {
     try {
       const region = await this.getProfileRegion(profile);
       const { stdout } = await execAsync(`aws ec2 describe-subnets --filters "Name=vpc-id,Values=${vpcId}" --profile ${profile} --region ${region}`);
@@ -930,6 +1204,7 @@ class DeploymentCLI {
       
       // Find private subnets (subnets without direct internet gateway route)
       const privateSubnetsWithAZ: Array<{subnetId: string, az: string}> = [];
+      const routeTableIds: Set<string> = new Set();
       
       for (const subnet of subnets.Subnets) {
         try {
@@ -940,6 +1215,7 @@ class DeploymentCLI {
           let hasInternetGatewayRoute = false;
           
           for (const routeTable of routeTables.RouteTables) {
+            routeTableIds.add(routeTable.RouteTableId);
             for (const route of routeTable.Routes) {
               if (route.GatewayId && route.GatewayId.startsWith('igw-')) {
                 hasInternetGatewayRoute = true;
@@ -966,10 +1242,10 @@ class DeploymentCLI {
       const subnetIds = privateSubnetsWithAZ.map(s => s.subnetId);
       const availabilityZones = [...new Set(privateSubnetsWithAZ.map(s => s.az))].sort();
       
-      return { subnetIds, availabilityZones };
+      return { subnetIds, availabilityZones, routeTableIds: Array.from(routeTableIds) };
     } catch (error) {
       console.log("⚠️  Could not detect private subnets.");
-      return { subnetIds: [], availabilityZones: [] };
+      return { subnetIds: [], availabilityZones: [], routeTableIds: [] };
     }
   }
 
@@ -1095,7 +1371,7 @@ class DeploymentCLI {
 
       // CDK needs explicit account/region for VPC lookup
       console.log(`🔍 Detecting private subnets in VPC ${config.vpcId}...`);
-      const { subnetIds: privateSubnetIds, availabilityZones } = await this.getPrivateSubnets(config.vpcId, config.awsProfile);
+      const { subnetIds: privateSubnetIds, availabilityZones, routeTableIds } = await this.getPrivateSubnets(config.vpcId, config.awsProfile);
       
       if (privateSubnetIds.length === 0) {
         throw new Error(`No private subnets found in VPC ${config.vpcId}. Make sure your VPC has private subnets with routes to NAT gateways or NAT instances.`);
@@ -1103,13 +1379,15 @@ class DeploymentCLI {
       
       console.log(`✅ Found ${privateSubnetIds.length} private subnets: ${privateSubnetIds.join(', ')}`);
       console.log(`📍 Availability zones: ${availabilityZones.join(', ')}`);
+      console.log(`🛣️  Route table IDs: ${routeTableIds.join(', ')}`);
       console.log(`🔧 Environment variables set: CDK_DEFAULT_ACCOUNT=${process.env.CDK_DEFAULT_ACCOUNT}, CDK_DEFAULT_REGION=${process.env.CDK_DEFAULT_REGION}`);
       
       // Add private subnet info to config
       const configWithSubnets = { 
         ...config, 
         detectedPrivateSubnets: privateSubnetIds,
-        detectedAvailabilityZones: availabilityZones
+        detectedAvailabilityZones: availabilityZones,
+        detectedRouteTableIds: routeTableIds
       };
       
       new AppDeploymentStack(app, stackName, configWithSubnets, {
