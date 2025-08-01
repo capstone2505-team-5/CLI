@@ -1,0 +1,26 @@
+{
+  "name": "etl-pipeline",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "dev": "sam local start-api --port 8080 --env-vars env.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.855.0",
+    "@aws-sdk/client-secrets-manager": "^3.848.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.152",
+    "@types/node": "^24.1.0",
+    "@types/pg": "^8.15.4",
+    "typescript": "^5.8.3"
+  }
+}
