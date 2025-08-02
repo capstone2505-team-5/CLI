@@ -1,15 +1,15 @@
 {
   "name": "error-analysis-deployer",
-  "version": "1.0.0",
-  "description": "Deploy error analysis app to AWS EC2 + RDS with VPN access",
-  "main": "dist/deploy-app.js",
+  "version": "2.0.0",
+  "description": "Deploy error analysis app to AWS with modern serverless architecture",
+  "main": "dist/deploy-app-new.js",
   "bin": {
-    "deploy-app": "./dist/deploy-app.js"
+    "deploy-app-new": "./dist/deploy-app-new.js"
   },
   "scripts": {
     "build": "tsc",
-    "dev": "ts-node deploy-app.ts deploy --interactive",
-    "start": "node dist/deploy-app.js",
+    "dev": "ts-node deploy-app-new.ts deploy --interactive",
+    "start": "node dist/deploy-app-new.js",
     "prepare": "npm run build"
   },
   "dependencies": {
@@ -29,11 +29,14 @@
   "keywords": [
     "aws",
     "cdk",
-    "docker",
-    "vpn",
+    "serverless",
     "error-analysis",
-    "ec2",
-    "rds"
+    "lambda",
+    "rds",
+    "cognito",
+    "apigateway",
+    "cloudfront",
+    "s3"
   ],
   "author": "Your Name",
   "license": "MIT"

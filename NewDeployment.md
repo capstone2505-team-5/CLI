@@ -1,0 +1,11 @@
+- VPC
+- NAT Gateway
+- Private Route Table
+- Private Subnets
+  - RDS
+  - API Gateway
+  - Backend Lambdas
+  - ETL Lambdas
+- Secrets Manager
+- S3 Bucket
+- Cloudfront
