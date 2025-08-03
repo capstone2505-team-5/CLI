@@ -14,6 +14,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as logs from "aws-cdk-lib/aws-logs";
@@ -22,6 +23,7 @@ import inquirer from "inquirer";
 import { Command } from "commander";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
+import * as fsSync from "fs";
 import { exec } from "child_process";
 import { promisify } from "util";
 import * as path from 'path';
@@ -128,8 +130,13 @@ export class AppDeploymentStack extends cdk.Stack {
         },
         {
           cidrMask: 24,
-          name: "Private",
+          name: "PrivateLambda",
           subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        },
+        {
+          cidrMask: 24,
+          name: "PrivateRDS",
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
         },
       ],
     });
@@ -178,7 +185,7 @@ export class AppDeploymentStack extends cdk.Stack {
       }),
       vpc,
       vpcSubnets: {
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
       },
       securityGroups: [securityGroup],
       databaseName: "error_analysis",
@@ -319,8 +326,8 @@ export class AppDeploymentStack extends cdk.Stack {
     securityGroup: ec2.SecurityGroup,
     config: DeploymentConfig
   ) {
-    // Create IAM role for Lambda functions
-    const lambdaRole = new iam.Role(this, "LambdaRole", {
+    // Create separate IAM roles for each Lambda function
+    const dbCreationRole = new iam.Role(this, "DbCreationLambdaRole", {
       assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
@@ -329,8 +336,28 @@ export class AppDeploymentStack extends cdk.Stack {
       ],
     });
 
-    // Grant access to API secrets
-    apiSecrets.grantRead(lambdaRole);
+    const getAllProjectRootSpansRole = new iam.Role(this, "GetAllProjectRootSpansLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("SecretsManagerReadWrite"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
+      ],
+    });
+
+    const getAllProjectsRole = new iam.Role(this, "GetAllProjectsLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("SecretsManagerReadWrite"),
+        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"),
+      ],
+    });
+
+    // Grant access to API secrets for all roles
+    apiSecrets.grantRead(dbCreationRole);
+    apiSecrets.grantRead(getAllProjectRootSpansRole);
+    apiSecrets.grantRead(getAllProjectsRole);
 
     // Database creation Lambda
     const dbCreationLambda = new lambdaNodejs.NodejsFunction(this, "DbCreationLambda", {
@@ -342,7 +369,7 @@ export class AppDeploymentStack extends cdk.Stack {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
       securityGroups: [securityGroup],
-      role: lambdaRole,
+      role: dbCreationRole,
       environment: {
         RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || `${config.appName}-db-credentials`,
         NODE_ENV: "production",
@@ -363,7 +390,7 @@ export class AppDeploymentStack extends cdk.Stack {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
       securityGroups: [securityGroup],
-      role: lambdaRole,
+      role: getAllProjectRootSpansRole,
       environment: {
         NODE_ENV: "production",
         PHOENIX_API_URL: config.phoenixApiUrl,
@@ -386,7 +413,7 @@ export class AppDeploymentStack extends cdk.Stack {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
       securityGroups: [securityGroup],
-      role: lambdaRole,
+      role: getAllProjectsRole,
       environment: {
         NODE_ENV: "production",
         PHOENIX_API_URL: config.phoenixApiUrl,
@@ -400,6 +427,9 @@ export class AppDeploymentStack extends cdk.Stack {
       },
     });
 
+    // Grant specific permission for GetAllProjectsLambda to invoke GetAllProjectRootSpansLambda
+    getAllProjectRootSpansLambda.grantInvoke(getAllProjectsRole);
+
     // Allow Lambda to access RDS
     database.connections.allowFrom(
       securityGroup,
@@ -407,8 +437,8 @@ export class AppDeploymentStack extends cdk.Stack {
       "Allow Lambda to access RDS"
     );
 
-    // Trigger database creation
-    this.triggerDbCreationLambda(dbCreationLambda, database, getAllProjectsLambda);
+    // Trigger database creation (simplified to avoid circular dependencies)
+    this.triggerDbCreationLambda(dbCreationLambda, database);
 
     return {
       dbCreationLambda,
@@ -426,6 +456,20 @@ export class AppDeploymentStack extends cdk.Stack {
       cognitoUserPools: [userPool],
     });
 
+    // Create mock Lambda function
+    const mockLambda = new lambdaNodejs.NodejsFunction(this, "MockApiLambda", {
+      entry: path.join(__dirname, "./lambdas/src/mock-api/index.ts"),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        NODE_ENV: "production",
+      },
+      bundling: {
+        minify: true,
+        sourceMap: true,
+      },
+    });
+
     // Create API Gateway
     const api = new apigateway.RestApi(this, "ErrorAnalysisApi", {
       restApiName: "Error Analysis API",
@@ -437,19 +481,14 @@ export class AppDeploymentStack extends cdk.Stack {
       },
     });
 
-    // Add resources and methods
-    const projectsResource = api.root.addResource("projects");
-    const projectsIntegration = new apigateway.LambdaIntegration(lambdaFunctions.getAllProjectsLambda);
+    // Add mock endpoint with Cognito authorization
+    const mockResource = api.root.addResource("mock");
+    const mockIntegration = new apigateway.LambdaIntegration(mockLambda);
     
-    projectsResource.addMethod("GET", projectsIntegration, {
+    mockResource.addMethod("GET", mockIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
-
-    // Add health check endpoint (no auth required)
-    const healthResource = api.root.addResource("health");
-    const healthIntegration = new apigateway.LambdaIntegration(lambdaFunctions.getAllProjectsLambda);
-    healthResource.addMethod("GET", healthIntegration);
 
     return api;
   }
@@ -467,43 +506,9 @@ export class AppDeploymentStack extends cdk.Stack {
     rule.addTarget(new targets.LambdaFunction(lambdaFunction));
   }
 
-  private createFrontendInfrastructure(config: DeploymentConfig) {
-    // Create S3 bucket for static assets
-    const s3Bucket = new s3.Bucket(this, "FrontendBucket", {
-      bucketName: `${config.appName}-frontend-${this.account}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-    });
-
-    // Create CloudFront distribution
-    const cloudFrontDistribution = new cloudfront.Distribution(this, "CloudFrontDistribution", {
-      defaultBehavior: {
-        origin: new origins.S3Origin(s3Bucket),
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-        cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
-        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-      },
-      defaultRootObject: "index.html",
-      errorResponses: [
-        {
-          httpStatus: 404,
-          responseHttpStatus: 200,
-          responsePagePath: "/index.html",
-        },
-      ],
-      enableLogging: false, // Disable logging to avoid ACL issues
-    });
-
-    return { s3Bucket, cloudFrontDistribution };
-  }
-
   private triggerDbCreationLambda(
     lambdaFunction: lambda.Function,
-    database: rds.DatabaseInstance,
-    getAllProjectsLambda?: lambda.Function
+    database: rds.DatabaseInstance
   ) {
     // Create a custom resource that invokes the Lambda function only on create
     const trigger = new cr.AwsCustomResource(this, "DbCreationTrigger", {
@@ -531,36 +536,52 @@ export class AppDeploymentStack extends cdk.Stack {
 
     // Ensure the trigger waits for the database to be ready
     trigger.node.addDependency(database);
-
-    // If getAllProjectsLambda is provided, trigger initial data load after DB creation
-    if (getAllProjectsLambda) {
-      const initialDataLoadTrigger = new cr.AwsCustomResource(this, "InitialDataLoadTrigger", {
-        onCreate: {
-          service: "Lambda",
-          action: "invoke",
-          parameters: {
-            FunctionName: getAllProjectsLambda.functionName,
-            InvocationType: "Event",
-            Payload: JSON.stringify({
-              action: "INITIAL_LOAD",
-              timestamp: new Date().toISOString(),
-            }),
-          },
-          physicalResourceId: cr.PhysicalResourceId.of("InitialDataLoadTrigger"),
-        },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ["lambda:InvokeFunction"],
-            resources: [getAllProjectsLambda.functionArn],
-          }),
-        ]),
-      });
-
-      // Ensure initial data load waits for DB creation to complete
-      initialDataLoadTrigger.node.addDependency(trigger);
-    }
   }
+
+  private createFrontendInfrastructure(config: DeploymentConfig) {
+    // Create S3 bucket for static assets with deployment
+    const s3Bucket = new s3.Bucket(this, "FrontendBucket", {
+      bucketName: `${config.appName}-frontend-${this.account}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: false,
+    });
+
+    // Deploy frontend assets to S3 bucket
+    const frontendDeployment = new s3deploy.BucketDeployment(this, "FrontendDeployment", {
+      sources: [s3deploy.Source.asset("./frontend")],
+      destinationBucket: s3Bucket,
+      destinationKeyPrefix: "", // Upload to root of bucket
+    });
+
+    // Create CloudFront distribution
+    const cloudFrontDistribution = new cloudfront.Distribution(this, "CloudFrontDistribution", {
+      defaultBehavior: {
+        origin: new origins.S3Origin(s3Bucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+      },
+      defaultRootObject: "index.html",
+      errorResponses: [
+        {
+          httpStatus: 404,
+          responseHttpStatus: 200,
+          responsePagePath: "/index.html",
+        },
+      ],
+      enableLogging: false, // Disable logging to avoid ACL issues
+    });
+
+    // Ensure CloudFront waits for deployment
+    cloudFrontDistribution.node.addDependency(frontendDeployment);
+
+    return { s3Bucket, cloudFrontDistribution };
+  }
+
+
 
   private createOutputs(
     config: DeploymentConfig,
