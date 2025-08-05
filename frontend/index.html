@@ -9,5 +9,21 @@
   </head>
   <body>
     <div id="root"></div>
+    <button id="login-btn">Login</button>
+    <script type="module" src="/assets/pkce.js"></script>
+    <script>
+      document.getElementById('login-btn').addEventListener('click', () => {
+        const clientId = 'your-client-id';
+        const redirectUri = 'https://your-cloudfront-url/callback';
+        const cognitoDomain = 'your-cognito-domain';
+  
+        generatePKCECodes().then(({ codeChallenge, verifier }) => {
+          localStorage.setItem('pkce_verifier', verifier);
+          const authUrl = `https://${cognitoDomain}/oauth2/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&code_challenge_method=S256&code_challenge=${codeChallenge}`;
+          window.location.href = authUrl;
+        });
+      });
+    </script>
   </body>
+  
 </html>
