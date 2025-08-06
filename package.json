@@ -10,6 +10,12 @@
     "build": "tsc",
     "dev": "ts-node deploy-app-new.ts deploy --interactive",
     "start": "node dist/deploy-app-new.js",
+    "deploy:lambda-edge": "ts-node deploy-lambda-edge.ts",
+    "debug-stack": "ts-node debug-cloudformation.ts",
+    "test:lambda-edge": "ts-node test-lambda-edge.ts",
+    "update:cloudfront": "ts-node update-cloudfront-lambda-edge.ts",
+    "update:cognito": "ts-node update-cognito-urls.ts",
+    "update:origin-policy": "ts-node update-cloudfront-origin-policy.ts",
     "prepare": "npm run build"
   },
   "dependencies": {
