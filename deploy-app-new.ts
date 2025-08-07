@@ -406,6 +406,7 @@ export class AppDeploymentStack extends cdk.Stack {
       entry: path.join(__dirname, "./lambdas/src/lambdas/ingestProject/index.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.minutes(5),
+      memorySize: 2048, // Increased memory for fetchProjectRootSpans function
       vpc,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
@@ -429,6 +430,7 @@ export class AppDeploymentStack extends cdk.Stack {
       entry: path.join(__dirname, "./lambdas/src/lambdas/entry/index.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.minutes(5),
+      memorySize: 1536, // Increased memory for fetchProjects function
       vpc,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
