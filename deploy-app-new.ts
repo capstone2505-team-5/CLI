@@ -840,12 +840,10 @@ class DeploymentCLI {
       }
     ]);
 
-    // Get region and availability zones
-    const region = await this.getProfileRegion(profileAnswer.awsProfile);
-    const availableZones = await this.getAvailableAvailabilityZones(profileAnswer.awsProfile, region);
+    // Get detected region
+    const detectedRegion = await this.getProfileRegion(profileAnswer.awsProfile);
     
-    console.log(`\n🌎 Detected region: ${region}`);
-    console.log(`📍 Available availability zones: ${availableZones.join(', ')}`);
+    console.log(`\n🌎 Detected region: ${detectedRegion}`);
 
     const restOfAnswers = await inquirer.prompt([
       {
@@ -862,14 +860,22 @@ class DeploymentCLI {
         name: "region",
         message: "AWS Region:",
         choices: [
-          { name: `${region} (detected)`, value: region },
+          { name: `${detectedRegion} (detected)`, value: detectedRegion },
           { name: "us-west-2", value: "us-west-2" },
           { name: "us-east-1", value: "us-east-1" },
           { name: "us-east-2", value: "us-east-2" },
           { name: "us-west-1", value: "us-west-1" },
         ],
-        default: region,
+        default: detectedRegion,
       },
+    ]);
+
+    // Get availability zones for the selected region
+    console.log(`\n🔍 Fetching availability zones for ${restOfAnswers.region}...`);
+    const availableZones = await this.getAvailableAvailabilityZones(profileAnswer.awsProfile, restOfAnswers.region);
+    console.log(`📍 Available availability zones: ${availableZones.join(', ')}`);
+
+    const availabilityZoneAnswers = await inquirer.prompt([
       {
         type: "list",
         name: "availabilityZone1",
@@ -894,12 +900,8 @@ class DeploymentCLI {
         default: "erroranalysis",
       },
 
-      {
-        type: "confirm",
-        name: "allowSelfSignup",
-        message: "Allow self signup for Cognito?",
-        default: true,
-      },
+      // Self signup is disabled by default for security
+      // Users will be created by admin only
       {
         type: "confirm",
         name: "createAdminUser",
@@ -950,7 +952,7 @@ class DeploymentCLI {
     ]);
 
     // Combine all answers
-    const allAnswers = { ...profileAnswer, ...restOfAnswers };
+    const allAnswers = { ...profileAnswer, ...restOfAnswers, ...availabilityZoneAnswers };
     
     // Combine the two availability zone selections
     const availabilityZones = [allAnswers.availabilityZone1, allAnswers.availabilityZone2];
@@ -958,6 +960,7 @@ class DeploymentCLI {
     return {
       ...allAnswers,
       availabilityZones,
+      allowSelfSignup: false, // Default to false for security - admin creates users only
       cognitoRedirectUris: [], // Default to empty array since we'll add CloudFront URLs automatically
     };
   }
@@ -1011,14 +1014,13 @@ class DeploymentCLI {
     }
   }
 
-  private async isBootstrapped(profile: string): Promise<boolean> {
+  private async isBootstrapped(profile: string, region: string): Promise<boolean> {
     try {
       const { stdout } = await execAsync(`aws sts get-caller-identity --profile ${profile}`);
       const identity = JSON.parse(stdout);
       const account = identity.Account;
-      const region = process.env.AWS_DEFAULT_REGION || 'us-west-2';
       
-      // Check if bootstrap stack exists
+      // Check if bootstrap stack exists in the specified region
       const { stdout: stacks } = await execAsync(`aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE --profile ${profile} --region ${region}`);
       const stackList = JSON.parse(stacks);
       
@@ -1030,8 +1032,8 @@ class DeploymentCLI {
     }
   }
 
-  private async bootstrapCdk(profile: string): Promise<void> {
-    console.log(`🔧 Bootstrapping CDK for profile: ${profile}...`);
+  private async bootstrapCdk(profile: string, region: string): Promise<void> {
+    console.log(`🔧 Bootstrapping CDK for profile: ${profile} in region: ${region}...`);
     
     // Temporarily rename cdk.json to avoid conflicts
     const cdkJsonExists = await fs.access('cdk.json').then(() => true).catch(() => false);
@@ -1043,7 +1045,6 @@ class DeploymentCLI {
       const { stdout } = await execAsync(`aws sts get-caller-identity --profile ${profile}`);
       const identity = JSON.parse(stdout);
       const account = identity.Account;
-      const region = process.env.AWS_DEFAULT_REGION || 'us-west-2';
 
       console.log(`📍 Account: ${account}`);
       console.log(`🌎 Region: ${region}`);
@@ -1088,14 +1089,14 @@ class DeploymentCLI {
       
       console.log(`👤 Using AWS Profile: ${config.awsProfile}`);
       
-      // Check if CDK is bootstrapped for this profile
-      const isBootstrapped = await this.isBootstrapped(config.awsProfile);
+      // Check if CDK is bootstrapped for this profile in the selected region
+      const isBootstrapped = await this.isBootstrapped(config.awsProfile, config.region);
       
       if (!isBootstrapped) {
-        console.log("⚡ CDK not bootstrapped for this profile. Bootstrapping automatically...");
-        await this.bootstrapCdk(config.awsProfile);
+        console.log(`⚡ CDK not bootstrapped for this profile in region ${config.region}. Bootstrapping automatically...`);
+        await this.bootstrapCdk(config.awsProfile, config.region);
       } else {
-        console.log("✅ CDK already bootstrapped for this profile");
+        console.log(`✅ CDK already bootstrapped for this profile in region ${config.region}`);
       }
 
       // Get account and use the selected region
@@ -1191,6 +1192,24 @@ class DeploymentCLI {
               console.log("\n🚀 Starting Lambda@Edge deployment process...");
               console.log("   This will wait for CloudFront to be fully deployed and then deploy Lambda@Edge functions to us-east-1");
               console.log("   This process may take several minutes...");
+              console.log("   ⚠️  NOTE: Lambda@Edge stack will be created in us-east-1 (different from main stack region)");
+              
+              // Double-check that main stack is fully deployed
+              console.log("🔍 Verifying main stack deployment status...");
+              const { execSync } = await import('child_process');
+              try {
+                const stackStatus = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].StackStatus' --output text | cat`, { 
+                  encoding: 'utf8',
+                  stdio: 'pipe'
+                });
+                const status = stackStatus.trim();
+                console.log(`📊 Main stack status: ${status}`);
+                if (status !== 'CREATE_COMPLETE' && status !== 'UPDATE_COMPLETE') {
+                  console.log("⚠️  Warning: Main stack may not be fully deployed yet");
+                }
+              } catch (error) {
+                console.log("⚠️  Could not verify main stack status, proceeding anyway...");
+              }
               
               try {
                 await this.deployLambdaEdgeStack(config, stackName);
@@ -1202,13 +1221,12 @@ class DeploymentCLI {
                 console.log("   Or check the logs above for detailed error information");
               }
               
+              console.log("   NOTE: Lambda@Edge stack will be created in us-east-1 (different from main stack region)");
+              console.log("   NOTE: Cloudfront will be deploying Lambda@Edge functions so won't be availabe for a few minutes")
               console.log("\n💡 Next steps:");
-              console.log("   1. Upload your frontend assets to the S3 bucket");
-              console.log("   2. Access your app via the CloudFront URL");
-              console.log("   3. Use Cognito hosted UI for authentication");
-              console.log("   4. API Gateway provides backend endpoints");
-              console.log("   5. Associate Lambda@Edge functions with CloudFront behaviors");
-              console.log("\n🔗 Monitor your application in AWS CloudFormation console");
+              console.log("   1. Create a new user in the Cognito user pool to access LLMonade");
+              console.log(`   2. Access LLMonade via the CloudFront URL at https://${config.cloudFrontDomain}`);
+              console.log("\n🔗 Monitor LLMonade in AWS CloudFormation console");
               resolve();
             } else {
               console.log(`\n❌ CDK deployment process exited with code ${code}`);
@@ -1246,18 +1264,18 @@ class DeploymentCLI {
     try {
       // Check if stack exists
       console.log("1. Checking if stack exists...");
-      const stackExists = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].StackStatus' --output text`, { 
-        encoding: 'utf8',
-        stdio: 'pipe'
-      });
-      console.log(`   Stack status: ${stackExists.trim()}`);
-      
-      // Get all outputs
-      console.log("2. Getting all outputs...");
-      const allOutputs = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].Outputs' --output json`, { 
-        encoding: 'utf8',
-        stdio: 'pipe'
-      });
+                const stackExists = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].StackStatus' --output text | cat`, { 
+            encoding: 'utf8',
+            stdio: 'pipe'
+          });
+          console.log(`   Stack status: ${stackExists.trim()}`);
+          
+          // Get all outputs
+          console.log("2. Getting all outputs...");
+          const allOutputs = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].Outputs' --output json | cat`, { 
+            encoding: 'utf8',
+            stdio: 'pipe'
+          });
       const outputs = JSON.parse(allOutputs);
       console.log(`   Found ${outputs.length} outputs:`);
       outputs.forEach((output: any) => {
@@ -1350,7 +1368,7 @@ class DeploymentCLI {
         try {
           console.log(`🔄 Attempt ${retryCount + 1}/${maxRetries} to get CloudFormation outputs...`);
           
-          const outputsJson = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].Outputs' --output json`, { 
+          const outputsJson = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${config.awsProfile} --region ${config.region} --query 'Stacks[0].Outputs' --output json | cat`, { 
             encoding: 'utf8',
             stdio: 'pipe'
           });
@@ -1477,6 +1495,8 @@ class DeploymentCLI {
         userPoolClientId,
         userPoolDomain,
         cloudFrontDomain,
+        userPoolId,
+        region: config.region,
       };
       
       console.log("📋 Lambda@Edge configuration being passed:");
@@ -1501,7 +1521,7 @@ class DeploymentCLI {
       console.log("\n🔍 Getting Lambda@Edge stack outputs...");
       const lambdaEdgeStackName = `${config.appName}-lambda-edge-stack`;
       const lambdaEdgeOutputsCommand = `aws cloudformation describe-stacks --stack-name ${lambdaEdgeStackName} --profile ${config.awsProfile} --region us-east-1 --query 'Stacks[0].Outputs' --output json`;
-      const lambdaEdgeOutputsJson = execSync(lambdaEdgeOutputsCommand, { encoding: 'utf8' });
+                const lambdaEdgeOutputsJson = execSync(`${lambdaEdgeOutputsCommand} | cat`, { encoding: 'utf8' });
       const lambdaEdgeOutputs = JSON.parse(lambdaEdgeOutputsJson);
       
       console.log("✅ Retrieved Lambda@Edge stack outputs");

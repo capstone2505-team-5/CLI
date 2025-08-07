@@ -11,6 +11,8 @@ interface LambdaEdgeDeploymentConfig {
   userPoolClientId: string;
   userPoolDomain: string;
   cloudFrontDomain: string;
+  userPoolId?: string;
+  region?: string;
 }
 
 function getLambdaEdgeConfig(): LambdaEdgeDeploymentConfig {
@@ -111,7 +113,7 @@ async function deployLambdaEdge(mainConfig?: any) {
       console.log("🔧 Checking if CDK is bootstrapped in us-east-1...");
       try {
         execSync(`aws sts get-caller-identity --profile ${process.env.AWS_PROFILE || 'default'} --region us-east-1`, { stdio: 'pipe' });
-        const stdout = execSync(`aws cloudformation describe-stacks --stack-name CDKToolkit --profile ${process.env.AWS_PROFILE || 'default'} --region us-east-1 --query 'Stacks[0].StackStatus' --output text`, { stdio: 'pipe' });
+        const stdout = execSync(`aws cloudformation describe-stacks --stack-name CDKToolkit --profile ${process.env.AWS_PROFILE || 'default'} --region us-east-1 --query 'Stacks[0].StackStatus' --output text | cat`, { stdio: 'pipe' });
         if (stdout.toString().trim() === 'CREATE_COMPLETE' || stdout.toString().trim() === 'UPDATE_COMPLETE') {
           console.log("✅ CDK already bootstrapped in us-east-1");
         } else {
@@ -129,7 +131,7 @@ async function deployLambdaEdge(mainConfig?: any) {
       // Check if stack exists and destroy it if it's in a bad state
       console.log("🔍 Checking stack status...");
       try {
-        const stackStatus = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${process.env.AWS_PROFILE || 'default'} --region us-east-1 --query 'Stacks[0].StackStatus' --output text`, { 
+        const stackStatus = execSync(`aws cloudformation describe-stacks --stack-name ${stackName} --profile ${process.env.AWS_PROFILE || 'default'} --region us-east-1 --query 'Stacks[0].StackStatus' --output text | cat`, { 
           stdio: 'pipe',
           env: deployEnv
         });
@@ -157,9 +159,16 @@ async function deployLambdaEdge(mainConfig?: any) {
       
       console.log("✅ Lambda@Edge stack deployed successfully to AWS!");
       console.log("📋 Next steps:");
-      console.log("1. Note the function ARNs from the outputs above");
-      console.log("2. Update your CloudFront distribution with the Lambda@Edge functions");
-      console.log("3. Test the authentication flow");
+      console.log("1. Use Cognito to create a profile in order to have access to the application:");
+      
+      // Create Cognito users page URL
+      const region = config.region || process.env.AWS_DEFAULT_REGION || 'us-west-2';
+      const userPoolId = config.userPoolId || config.userPoolClientId.split('_')[0] + '_' + config.userPoolClientId.split('_')[1];
+      const cognitoUrl = `https://console.aws.amazon.com/cognito/users/?region=${region}&userpool=${userPoolId}`;
+      
+      console.log(`   • Cognito Users Page: ${cognitoUrl}`);
+      console.log("2. Then, start evaluating your AI application at:");
+      console.log(`   • Application URL: https://${config.cloudFrontDomain}`);
       
     } catch (deployError) {
       console.log("❌ Lambda@Edge deployment failed:");

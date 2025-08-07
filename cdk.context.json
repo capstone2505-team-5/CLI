@@ -4,5 +4,13 @@
     "us-west-2b",
     "us-west-2c",
     "us-west-2d"
+  ],
+  "availability-zones:account=088044432001:region=us-east-2": [
+    "us-east-2a",
+    "us-east-2b",
+    "us-east-2c"
+  ],
+  "acknowledged-issue-numbers": [
+    34892
   ]
 }
