@@ -502,17 +502,56 @@ export class AppDeploymentStack extends cdk.Stack {
         NODE_ENV: "production",
         PHOENIX_API_URL: config.phoenixApiUrl,
         PHOENIX_API_KEY_SECRET_NAME: lambdaFunctions.apiSecrets.secretName,
+        OPENAI_API_KEY_SECRET_NAME: lambdaFunctions.apiSecrets.secretName,
         RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || `${config.appName}-db-credentials`,
         PHOENIX_API_KEY: lambdaFunctions.apiSecrets.secretValueFromJson("phoenixApiKey").toString(),
       },
     });
 
+    // Create Express API Lambda function using the pre-built handler
+    const formatBatchLambda = new lambda.Function(this, "formatBatchLambda", {
+      functionName: "FormatBatchFunction", // Set specific function name to match Express API code
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: "format-batch-handler.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "./backend")),
+      timeout: cdk.Duration.seconds(300),
+      memorySize: 1024,
+      vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+      },
+      securityGroups: [lambdaSecurityGroup],
+      role: lambdaFunctions.getAllProjectsLambda.role,
+      environment: {
+        NODE_ENV: "production",
+        PHOENIX_API_URL: config.phoenixApiUrl,
+        PHOENIX_API_KEY_SECRET_NAME: lambdaFunctions.apiSecrets.secretName,
+        RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || `${config.appName}-db-credentials`,
+        PHOENIX_API_KEY: lambdaFunctions.apiSecrets.secretValueFromJson("phoenixApiKey").toString(),
+        OPENAI_API_KEY_SECRET_NAME: lambdaFunctions.apiSecrets.secretName,
+      },
+    });
+
     // Grant the Lambda function access to the API secrets
     lambdaFunctions.apiSecrets.grantRead(expressApiLambda);
+    lambdaFunctions.apiSecrets.grantRead(formatBatchLambda);
     
     // Grant the Lambda function access to the database
     database.connections.allowFrom(expressApiLambda, ec2.Port.tcp(5432), 'Allow Express API Lambda to connect to RDS');
-
+    database.connections.allowFrom(formatBatchLambda, ec2.Port.tcp(5432), 'Allow Format Batch Lambda to connect to RDS');
+    
+    // Grant Express API Lambda permission to invoke other Lambda functions
+    // Note: Removed circular dependencies to prevent CloudFormation validation errors
+    // The Express API Lambda can still invoke other functions through the AWS SDK
+    // without explicit grantInvoke permissions
+    
+    // Add Lambda invoke permission to the Express API Lambda role
+    expressApiLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: ['*'], // Allow invoking any Lambda function in the account
+    }));
+    
     // Create API Gateway
     const api = new apigateway.RestApi(this, "ErrorAnalysisApi", {
       restApiName: "Error Analysis API",
