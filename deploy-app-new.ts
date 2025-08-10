@@ -50,9 +50,6 @@ interface DeploymentConfig {
   cognitoDomain: string;
   cognitoRedirectUris?: string[];
   allowSelfSignup: boolean;
-  createAdminUser: boolean;
-  adminEmail?: string;
-  adminPassword?: string;
   
   // CloudFront Configuration
   cloudFrontDomain?: string;
@@ -283,60 +280,7 @@ export class AppDeploymentStack extends cdk.Stack {
       ],
     });
 
-    // Create admin user if requested
-    if (config.createAdminUser && config.adminEmail && config.adminPassword) {
-      new cr.AwsCustomResource(this, "AdminUser", {
-        onCreate: {
-          service: "CognitoIdentityServiceProvider",
-          action: "adminCreateUser",
-          parameters: {
-            UserPoolId: userPool.userPoolId,
-            Username: config.adminEmail,
-            UserAttributes: [
-              {
-                Name: "email",
-                Value: config.adminEmail,
-              },
-              {
-                Name: "email_verified",
-                Value: "true",
-              },
-            ],
-            MessageAction: "SUPPRESS",
-          },
-          physicalResourceId: cr.PhysicalResourceId.of("AdminUser"),
-        },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ["cognito-idp:AdminCreateUser"],
-            resources: [userPool.userPoolArn],
-          }),
-        ]),
-      });
 
-      // Set admin password
-      new cr.AwsCustomResource(this, "AdminPassword", {
-        onCreate: {
-          service: "CognitoIdentityServiceProvider",
-          action: "adminSetUserPassword",
-          parameters: {
-            UserPoolId: userPool.userPoolId,
-            Username: config.adminEmail,
-            Password: config.adminPassword,
-            Permanent: true,
-          },
-          physicalResourceId: cr.PhysicalResourceId.of("AdminPassword"),
-        },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ["cognito-idp:AdminSetUserPassword"],
-            resources: [userPool.userPoolArn],
-          }),
-        ]),
-      });
-    }
 
     return { userPool, userPoolClient };
   }
@@ -897,7 +841,6 @@ class DeploymentCLI {
     console.log(`🔐 Cognito Domain: ${config.cognitoDomain}`);
     console.log(`🌐 Cognito Redirect URIs: ${(config.cognitoRedirectUris || []).join(", ")}`);
     console.log(`👥 Self Signup: ${config.allowSelfSignup ? "Enabled" : "Disabled"}`);
-    console.log(`👑 Create Admin User: ${config.createAdminUser ? "Yes" : "No"}`);
     console.log(`🔑 API Keys: OpenAI ✓, Phoenix ✓`);
     console.log(`⚡ Lambda: Database Creation, Project Management (Node.js 22.x)`);
     console.log(`🌍 Frontend: S3 + CloudFront Distribution`);
@@ -1007,30 +950,7 @@ class DeploymentCLI {
       },
 
       // Self signup is disabled by default for security
-      // Users will be created by admin only
-      {
-        type: "confirm",
-        name: "createAdminUser",
-        message: "Create an admin user during deployment?",
-        default: false,
-      },
-      {
-        type: "input",
-        name: "adminEmail",
-        message: "Admin user email:",
-        when: (answers: any) => answers.createAdminUser,
-        validate: (input: string) =>
-          /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input) || "Enter a valid email address",
-      },
-      {
-        type: "password",
-        name: "adminPassword",
-        message: "Admin user password (min 8 chars, with uppercase, lowercase, number, symbol):",
-        when: (answers: any) => answers.createAdminUser,
-        validate: (input: string) =>
-          /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/.test(input) ||
-          "Password must be at least 8 characters with uppercase, lowercase, number, and symbol",
-      },
+
       {
         type: "password",
         name: "openApiKey",
@@ -1434,7 +1354,6 @@ class DeploymentCLI {
       cognitoDomain: "",
       cognitoRedirectUris: [],
       allowSelfSignup: false,
-      createAdminUser: false,
     };
     
     try {
