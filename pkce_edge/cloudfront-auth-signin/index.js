@@ -43,16 +43,14 @@ exports.handler = async (event) => {
     const state = crypto.randomBytes(16).toString('hex');
     const nonce = crypto.randomBytes(16).toString('hex');
     
-    // Build Cognito authorization URL with PKCE
+    // Build Cognito authorization URL with implicit flow
     const authParams = new URLSearchParams({
-        response_type: 'code',
+        response_type: 'token id_token',
         client_id: CONFIG.USER_POOL_CLIENT_ID,
         redirect_uri: CONFIG.REDIRECT_URI,
         scope: 'openid email profile',
         state: state,
-        nonce: nonce,
-        code_challenge: codeChallenge,
-        code_challenge_method: 'S256'
+        nonce: nonce
     });
     
     const authUrl = `${CONFIG.USER_POOL_DOMAIN}/oauth2/authorize?${authParams.toString()}`;

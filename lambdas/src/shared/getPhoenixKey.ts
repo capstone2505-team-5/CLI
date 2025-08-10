@@ -10,7 +10,7 @@ const getPhoenixKey = async (): Promise<string> => {
   const secret_name = process.env.PHOENIX_API_KEY_SECRET_NAME;
   if (!secret_name) throw new Error("Missing PHOENIX_API_KEY_SECRET_NAME env variable");
 
-  const client = new SecretsManagerClient({ region: "us-west-2" });
+  const client = new SecretsManagerClient({ region: process.env.AWS_REGION || "us-west-2" });
 
   try {
     console.log('Fetching Phoenix API key')

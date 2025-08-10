@@ -20,6 +20,8 @@ interface LambdaEdgeConfig {
 
 export class LambdaEdgeStack extends cdk.Stack {
   private config: LambdaEdgeConfig;
+  public readonly apiRequestVersion: lambda.Version;
+  public readonly authVersion: lambda.Version; // Expose the auth function version
 
   constructor(scope: Construct, id: string, config: LambdaEdgeConfig, props?: cdk.StackProps) {
     super(scope, id, {
@@ -44,9 +46,9 @@ export class LambdaEdgeStack extends cdk.Stack {
       ],
     });
 
-    // Create Lambda@Edge functions
-    const viewerRequestFunction = new lambdaNodejs.NodejsFunction(this, "CloudFrontAuthViewerRequest", {
-      entry: path.join(__dirname, "./pkce_edge/cloudfront-auth-viewer-request/index.js"),
+    // Create single Lambda@Edge authentication function (implicit flow)
+    const authFunction = new lambdaNodejs.NodejsFunction(this, "CloudFrontAuth", {
+      entry: path.join(__dirname, "./edge/index.js"),
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(5), // Lambda@Edge has 5-second timeout
       role: lambdaEdgeRole,
@@ -59,8 +61,8 @@ export class LambdaEdgeStack extends cdk.Stack {
       },
     });
 
-    const signinFunction = new lambdaNodejs.NodejsFunction(this, "CloudFrontAuthSignin", {
-      entry: path.join(__dirname, "./pkce_edge/cloudfront-auth-signin/index.js"),
+    const apiRequestFunction = new lambdaNodejs.NodejsFunction(this, "CloudFrontAuthApiRequest", {
+      entry: path.join(__dirname, "./pkce_edge/cloudfront-auth-api-request/index.js"),
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(5),
       role: lambdaEdgeRole,
@@ -73,81 +75,34 @@ export class LambdaEdgeStack extends cdk.Stack {
       },
     });
 
-    const signoutFunction = new lambdaNodejs.NodejsFunction(this, "CloudFrontAuthSignout", {
-      entry: path.join(__dirname, "./pkce_edge/cloudfront-auth-signout/index.js"),
-      runtime: lambda.Runtime.NODEJS_22_X,
-      timeout: cdk.Duration.seconds(5),
-      role: lambdaEdgeRole,
-      bundling: {
-        minify: false, // Don't minify for debugging
-        sourceMap: false,
-        externalModules: [],
-        nodeModules: [],
-        target: "es2020",
-      },
+    // Publish version of the Lambda function for Lambda@Edge
+    this.authVersion = new lambda.Version(this, "CloudFrontAuthVersion", {
+      lambda: authFunction,
+      description: "Version 1 of Authentication Lambda@Edge function",
     });
 
-    const callbackFunction = new lambdaNodejs.NodejsFunction(this, "CloudFrontAuthCallback", {
-      entry: path.join(__dirname, "./pkce_edge/cloudfront-auth-callback/index.js"),
-      runtime: lambda.Runtime.NODEJS_22_X,
-      timeout: cdk.Duration.seconds(5),
-      role: lambdaEdgeRole,
-      bundling: {
-        minify: false, // Don't minify for debugging
-        sourceMap: false,
-        externalModules: [],
-        nodeModules: [],
-        target: "es2020",
-      },
+    const apiRequestVersion = new lambda.Version(this, "CloudFrontAuthApiRequestVersion", {
+      lambda: apiRequestFunction,
+      description: "Version 1 of API Request Lambda@Edge function",
     });
 
-    // Publish versions of the Lambda functions for Lambda@Edge
-    const viewerRequestVersion = new lambda.Version(this, "CloudFrontAuthViewerRequestVersion", {
-      lambda: viewerRequestFunction,
-      description: "Version 1 of Viewer Request Lambda@Edge function",
-    });
-
-    const signinVersion = new lambda.Version(this, "CloudFrontAuthSigninVersion", {
-      lambda: signinFunction,
-      description: "Version 1 of Signin Lambda@Edge function",
-    });
-
-    const signoutVersion = new lambda.Version(this, "CloudFrontAuthSignoutVersion", {
-      lambda: signoutFunction,
-      description: "Version 1 of Signout Lambda@Edge function",
-    });
-
-    const callbackVersion = new lambda.Version(this, "CloudFrontAuthCallbackVersion", {
-      lambda: callbackFunction,
-      description: "Version 1 of Callback Lambda@Edge function",
-    });
-
-    // Output the function version ARNs for use with CloudFront
+    // Output the function version ARN for use with CloudFront
     // Use stack-specific export names to avoid conflicts
     const stackName = this.stackName;
     
-    new cdk.CfnOutput(this, "ViewerRequestFunctionArn", {
-      value: viewerRequestVersion.functionArn,
-      description: "Lambda@Edge Viewer Request Function Version ARN",
-      exportName: `${stackName}-ViewerRequestFunctionArn`,
+    new cdk.CfnOutput(this, "AuthFunctionArn", {
+      value: this.authVersion.functionArn,
+      description: "Lambda@Edge Authentication Function Version ARN",
+      exportName: `${stackName}-AuthFunctionArn`,
     });
 
-    new cdk.CfnOutput(this, "SigninFunctionArn", {
-      value: signinVersion.functionArn,
-      description: "Lambda@Edge Signin Function Version ARN",
-      exportName: `${stackName}-SigninFunctionArn`,
+    new cdk.CfnOutput(this, "ApiRequestFunctionArn", {
+      value: apiRequestVersion.functionArn,
+      description: "Lambda@Edge API Request Function Version ARN",
+      exportName: `${stackName}-ApiRequestFunctionArn`,
     });
 
-    new cdk.CfnOutput(this, "SignoutFunctionArn", {
-      value: signoutVersion.functionArn,
-      description: "Lambda@Edge Signout Function Version ARN",
-      exportName: `${stackName}-SignoutFunctionArn`,
-    });
-
-    new cdk.CfnOutput(this, "CallbackFunctionArn", {
-      value: callbackVersion.functionArn,
-      description: "Lambda@Edge Callback Function Version ARN",
-      exportName: `${stackName}-CallbackFunctionArn`,
-    });
+    // Expose the version as a public property for use in other stacks
+    this.apiRequestVersion = apiRequestVersion;
   }
 } 

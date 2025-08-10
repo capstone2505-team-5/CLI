@@ -187,8 +187,8 @@ async function deployLambdaEdge(mainConfig?: any) {
 }
 
 function writeConfigFile(config: LambdaEdgeDeploymentConfig) {
-  const configPath = path.join(__dirname, "./pkce_edge/config.js");
-  const redirectUri = `https://${config.cloudFrontDomain}/callback`;
+  const configPath = path.join(__dirname, "./edge/config.js");
+  const redirectUri = `https://${config.cloudFrontDomain}/callback.html`;
   const logoutUri = `https://${config.cloudFrontDomain}`;
   
   const configContent = `// Configuration for Lambda@Edge functions

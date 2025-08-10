@@ -12,5 +12,9 @@
   ],
   "acknowledged-issue-numbers": [
     34892
+  ],
+  "availability-zones:account=088044432001:region=us-west-1": [
+    "us-west-1a",
+    "us-west-1c"
   ]
 }

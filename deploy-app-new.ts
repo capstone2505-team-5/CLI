@@ -99,13 +99,13 @@ export class AppDeploymentStack extends cdk.Stack {
     );
 
     // Create API Gateway
-    const apiGateway = this.createApiGateway(lambdaFunctions, userPool);
+    const apiGateway = this.createApiGateway(lambdaFunctions, userPool, database, config, vpc, lambdaSecurityGroup);
 
     // Create EventBridge Scheduler
     this.createEventBridgeScheduler(lambdaFunctions.getAllProjectsLambda, config);
 
     // Create S3 bucket and CloudFront distribution
-    const { s3Bucket, cloudFrontDistribution } = this.createFrontendInfrastructure(config, userPool, userPoolClient);
+    const { s3Bucket, cloudFrontDistribution } = this.createFrontendInfrastructure(config, userPool, userPoolClient, apiGateway);
 
     // Create outputs
     this.createOutputs(
@@ -263,6 +263,7 @@ export class AppDeploymentStack extends cdk.Stack {
       oAuth: {
         flows: {
           authorizationCodeGrant: true,
+          implicitCodeGrant: true, // Changed from authorizationCodeGrant to implicitCodeGrant
         },
         scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.PROFILE],
         callbackUrls: [
@@ -272,7 +273,7 @@ export class AppDeploymentStack extends cdk.Stack {
         ],
         logoutUrls: [
           ...(config.cognitoRedirectUris || []),
-          "https://temp-callback-url.com", // Temporary URL, will be replaced during post-deployment
+          "https://temp-logout-url.com", // Temporary URL, will be replaced during post-deployment
           // Add CloudFront signout URL (will be updated after CloudFront is created)
         ],
       },
@@ -467,31 +468,50 @@ export class AppDeploymentStack extends cdk.Stack {
       dbCreationLambda,
       getAllProjectRootSpansLambda,
       getAllProjectsLambda,
+      apiSecrets, // Include API secrets for Express API access
     };
   }
 
   private createApiGateway(
     lambdaFunctions: any,
-    userPool: cognito.UserPool
+    userPool: cognito.UserPool,
+    database: rds.DatabaseInstance,
+    config: DeploymentConfig,
+    vpc: ec2.Vpc,
+    lambdaSecurityGroup: ec2.SecurityGroup
   ): apigateway.RestApi {
     // Create Cognito Authorizer
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "CognitoAuthorizer", {
       cognitoUserPools: [userPool],
     });
 
-    // Create mock Lambda function
-    const mockLambda = new lambdaNodejs.NodejsFunction(this, "MockApiLambda", {
-      entry: path.join(__dirname, "./lambdas/src/mock-api/index.ts"),
+    // Create Express API Lambda function using the pre-built handler
+    const expressApiLambda = new lambda.Function(this, "ExpressApiLambda", {
       runtime: lambda.Runtime.NODEJS_22_X,
+      handler: "lambda-handler.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "./backend")),
       timeout: cdk.Duration.seconds(30),
+      memorySize: 1024,
+      vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+      },
+      securityGroups: [lambdaSecurityGroup],
+      role: lambdaFunctions.getAllProjectsLambda.role,
       environment: {
         NODE_ENV: "production",
-      },
-      bundling: {
-        minify: true,
-        sourceMap: true,
+        PHOENIX_API_URL: config.phoenixApiUrl,
+        PHOENIX_API_KEY_SECRET_NAME: lambdaFunctions.apiSecrets.secretName,
+        RDS_CREDENTIALS_SECRET_NAME: database.secret?.secretName || `${config.appName}-db-credentials`,
+        PHOENIX_API_KEY: lambdaFunctions.apiSecrets.secretValueFromJson("phoenixApiKey").toString(),
       },
     });
+
+    // Grant the Lambda function access to the API secrets
+    lambdaFunctions.apiSecrets.grantRead(expressApiLambda);
+    
+    // Grant the Lambda function access to the database
+    database.connections.allowFrom(expressApiLambda, ec2.Port.tcp(5432), 'Allow Express API Lambda to connect to RDS');
 
     // Create API Gateway
     const api = new apigateway.RestApi(this, "ErrorAnalysisApi", {
@@ -504,11 +524,19 @@ export class AppDeploymentStack extends cdk.Stack {
       },
     });
 
-    // Add mock endpoint with Cognito authorization
-    const mockResource = api.root.addResource("mock");
-    const mockIntegration = new apigateway.LambdaIntegration(mockLambda);
+    // Create proxy resource that catches all requests
+    const proxyResource = api.root.addResource("{proxy+}");
+    const proxyIntegration = new apigateway.LambdaIntegration(expressApiLambda);
     
-    mockResource.addMethod("GET", mockIntegration, {
+    // Add methods for the proxy resource
+    proxyResource.addMethod("ANY", proxyIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Add root method for health checks
+    const rootIntegration = new apigateway.LambdaIntegration(expressApiLambda);
+    api.root.addMethod("GET", rootIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
@@ -567,6 +595,7 @@ export class AppDeploymentStack extends cdk.Stack {
     config: DeploymentConfig,
     userPool: cognito.UserPool,
     userPoolClient: cognito.UserPoolClient,
+    apiGateway: apigateway.RestApi,
     lambdaEdgeStack?: LambdaEdgeStack
   ) {
     // Create S3 bucket for static assets with deployment
@@ -578,15 +607,27 @@ export class AppDeploymentStack extends cdk.Stack {
       autoDeleteObjects: false,
     });
 
-    // Deploy frontend assets to S3 bucket
+    // Deploy frontend assets to S3 bucket (including both static files and dynamic config)
     const frontendDeployment = new s3deploy.BucketDeployment(this, "FrontendDeployment", {
-      sources: [s3deploy.Source.asset("./frontend")],
+      sources: [
+        s3deploy.Source.asset("./frontend"),
+        s3deploy.Source.data("config.js", `window.APP_CONFIG = { API_GATEWAY_URL: "${apiGateway.url}" };`)
+      ],
       destinationBucket: s3Bucket,
       destinationKeyPrefix: "", // Upload to root of bucket
     });
 
     // Create a single shared S3 origin to avoid multiple origins
     const s3Origin = new origins.S3Origin(s3Bucket);
+
+    // Create API Gateway origin with prod stage path
+    const apiOrigin = new origins.HttpOrigin(`${apiGateway.restApiId}.execute-api.${this.region}.amazonaws.com`, {
+      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+      originPath: '/prod', // Add the API Gateway stage path
+      customHeaders: {
+        'X-API-Key': 'dummy', // Will be replaced by Lambda@Edge
+      },
+    });
 
     // Create CloudFront distribution with all behaviors configured
     const cloudFrontDistribution = new cloudfront.Distribution(this, "CloudFrontDistribution", {
@@ -596,6 +637,14 @@ export class AppDeploymentStack extends cdk.Stack {
         allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
         cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        ...(lambdaEdgeStack && {
+          edgeLambdas: [
+            {
+              functionVersion: lambdaEdgeStack.authVersion, // Use the new auth function
+              eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+            },
+          ],
+        }),
       },
       defaultRootObject: "index.html",
       errorResponses: [
@@ -607,20 +656,36 @@ export class AppDeploymentStack extends cdk.Stack {
       ],
       enableLogging: false, // Disable logging to avoid ACL issues
       additionalBehaviors: {
-        "/signin": {
-          origin: s3Origin,
+        "/api/*": {
+          origin: apiOrigin,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          ...(lambdaEdgeStack?.authVersion && {
+            edgeLambdas: [
+              {
+                functionVersion: lambdaEdgeStack.authVersion,
+                eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+              },
+            ],
+          }),
         },
-        "/signout": {
-          origin: s3Origin,
-          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
-          cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-        },
+        // "/signin": {
+        //   origin: s3Origin,
+        //   viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        //   allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        //   cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+        //   cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        // },
+        // "/signout": {
+        //   origin: s3Origin,
+        //   viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        //   allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        //   cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+        //   cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        // },
         "/callback": {
           origin: s3Origin,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -1608,7 +1673,7 @@ class DeploymentCLI {
       const clientConfig = JSON.parse(clientOutput);
 
       // Construct the URLs
-      const callbackUrl = `https://${outputs.cloudFrontDomain}/callback`;
+      const callbackUrl = `https://${outputs.cloudFrontDomain}/callback.html`;
       const signoutUrl = `https://${outputs.cloudFrontDomain}`;
 
       // Update the callback URLs and logout URLs
@@ -1616,8 +1681,8 @@ class DeploymentCLI {
       const currentLogoutUrls = clientConfig.UserPoolClient.LogoutURLs || [];
 
       // Add the new URLs if they don't already exist
-      const updatedCallbackUrls = [...new Set([...currentCallbackUrls, callbackUrl])];
-      const updatedLogoutUrls = [...new Set([...currentLogoutUrls, signoutUrl])];
+      const updatedCallbackUrls = Array.from(new Set([...currentCallbackUrls, callbackUrl]));
+      const updatedLogoutUrls = Array.from(new Set([...currentLogoutUrls, signoutUrl]));
 
       // Update the user pool client
       console.log("🚀 Updating Cognito User Pool Client...");
@@ -1627,7 +1692,7 @@ class DeploymentCLI {
         --callback-urls ${updatedCallbackUrls.join(' ')} \
         --logout-urls ${updatedLogoutUrls.join(' ')} \
         --supported-identity-providers COGNITO \
-        --allowed-o-auth-flows code \
+        --allowed-o-auth-flows implicit \
         --allowed-o-auth-scopes email openid profile \
         --allowed-o-auth-flows-user-pool-client \
         --profile ${config.awsProfile} \
@@ -1656,14 +1721,11 @@ class DeploymentCLI {
     try {
       const { execSync } = await import('child_process');
       
-      // Get Lambda@Edge function ARNs
-      const viewerRequestArn = outputs.lambdaEdgeOutputs.find((o: any) => o.OutputKey === 'ViewerRequestFunctionArn')?.OutputValue;
-      const signinArn = outputs.lambdaEdgeOutputs.find((o: any) => o.OutputKey === 'SigninFunctionArn')?.OutputValue;
-      const signoutArn = outputs.lambdaEdgeOutputs.find((o: any) => o.OutputKey === 'SignoutFunctionArn')?.OutputValue;
-      const callbackArn = outputs.lambdaEdgeOutputs.find((o: any) => o.OutputKey === 'CallbackFunctionArn')?.OutputValue;
+      // Get Lambda@Edge function ARN for implicit flow
+      const authFunctionArn = outputs.lambdaEdgeOutputs.find((o: any) => o.OutputKey === 'AuthFunctionArn')?.OutputValue;
 
-      if (!viewerRequestArn || !signinArn || !signoutArn || !callbackArn) {
-        throw new Error("Missing required Lambda@Edge function ARNs");
+      if (!authFunctionArn) {
+        throw new Error("Missing required Lambda@Edge function ARN");
       }
 
       // Get current CloudFront distribution configuration
@@ -1678,13 +1740,13 @@ class DeploymentCLI {
       // Update cache behaviors with Lambda@Edge functions
       console.log("🔧 Updating cache behaviors with Lambda@Edge functions...");
 
-      // Update default cache behavior (viewer request for all paths)
+      // Update default cache behavior with authentication function
       if (distributionConfig.DefaultCacheBehavior) {
         distributionConfig.DefaultCacheBehavior.LambdaFunctionAssociations = {
           Quantity: 1,
           Items: [
             {
-              LambdaFunctionARN: viewerRequestArn,
+              LambdaFunctionARN: authFunctionArn,
               EventType: 'viewer-request',
               IncludeBody: false
             }
@@ -1692,45 +1754,18 @@ class DeploymentCLI {
         };
       }
 
-      // Update specific cache behaviors
+      // Update /api/* cache behavior with authentication function
       if (distributionConfig.CacheBehaviors && distributionConfig.CacheBehaviors.Items) {
         const updatedBehaviors = distributionConfig.CacheBehaviors.Items.map((behavior: any) => {
-          if (behavior.PathPattern === '/signin') {
+          if (behavior.PathPattern === '/api/*') {
+            console.log('   Adding Lambda@Edge function to /api/* behavior');
             return {
               ...behavior,
               LambdaFunctionAssociations: {
                 Quantity: 1,
                 Items: [
                   {
-                    LambdaFunctionARN: signinArn,
-                    EventType: 'viewer-request',
-                    IncludeBody: false
-                  }
-                ]
-              }
-            };
-          } else if (behavior.PathPattern === '/signout') {
-            return {
-              ...behavior,
-              LambdaFunctionAssociations: {
-                Quantity: 1,
-                Items: [
-                  {
-                    LambdaFunctionARN: signoutArn,
-                    EventType: 'viewer-request',
-                    IncludeBody: false
-                  }
-                ]
-              }
-            };
-          } else if (behavior.PathPattern === '/callback') {
-            return {
-              ...behavior,
-              LambdaFunctionAssociations: {
-                Quantity: 1,
-                Items: [
-                  {
-                    LambdaFunctionARN: callbackArn,
+                    LambdaFunctionARN: authFunctionArn,
                     EventType: 'viewer-request',
                     IncludeBody: false
                   }
@@ -1743,6 +1778,9 @@ class DeploymentCLI {
 
         distributionConfig.CacheBehaviors.Items = updatedBehaviors;
       }
+
+      // For implicit flow, we don't need specific cache behaviors for signin/signout/callback
+      // The authentication function handles all paths and redirects to Cognito when needed
 
       // Write updated configuration to temporary file
       const tempConfigFile = 'cloudfront-lambda-edge-temp.json';

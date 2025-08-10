@@ -1,0 +1,17 @@
+{
+  "name": "LLMonade",
+  "short_name": "LLMonade",
+  "description": "Error Analysis App for LLM Applications",
+  "icons": [
+    {
+      "src": "/src/assets/icons/Updated_OG_Symbol.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#fecf2c",
+  "background_color": "#1a1a1a"
+} 
