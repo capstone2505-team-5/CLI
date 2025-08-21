@@ -829,22 +829,58 @@ class DeploymentCLI {
   }
 
   private async handleDeploy(options: any) {
-    console.log("🚀 Starting Error Analysis App deployment (New Architecture)...\n");
+    console.log(`                                         
+         *********              %%%                     
+         ************         %%%%%                     
+         **************     %%%%%%%                     
+          ******###*****   %%%%%%                       
+            ******###**** %%%%%                         
+             *************%%%%%                         
+                **********%%%%                          
+                       +++++%%%%%%                      
+                  ==========#%%%%%%%%%%                 
+               =============%%%%%%%%%%%%%               
+            ==========      %%%%%%%%%%%%%%%%            
+           ======= =======  %%%%%%%%%%%%%%%%%           
+         ======= ========== %%%%%%*++++#%%%%%%%         
+        ====== =  ========= %%%%%+=%%%+=%%%%%%%%        
+       =====  ====  ======= %%%%%*=+**==%%%%%%%%%       
+       ====  =======  ===== %%%%%%#+==#%%%%%%%%%%       
+      ===== ==========  === %%%%%%%#=*%%%%%%%%%%%%      
+      ====  ============  = %%%%%%%#=*%%%*+=+*%%%%      
+      ====  =============   %%%%%%%#=*%%*=*%#=+%%%      
+      ===                   %%%%%%%#=*%%#=+++=#%%%      
+      ===   =============   %%%%%%%#=*%%%%*=+#%%%%      
+      ====  =============   %%%%%%*=*%%%%%#=*%%%%%      
+      ====  ===========  == %%%%#++#%%%%%%#=*%%%%%      
+       ===  =========  ==== %%%%=+%%%%%%%#+=#%%%%       
+       ====  ======  ====== %%%%=+%%%%%%*=+#%%%%%       
+        ====  ===  ======== %%%%=+%%%%#=+#%%%%%%        
+         =====    ========= %%%%=+%%%#=*%%%%%%%         
+          =====   ========= %%%%=+%%%*=%%%%%%%          
+           =======   =====  %%%%=+%%%*=%%%%%%           
+             ========       %%%%=+%%%*=%%%%             
+               =============%%%%=+%%%*=#%               
+                  ==========#%%%=+%%%#                  
+                      ======#%%%+*                      
+                         ===#%%%                         
+                         `);
+    console.log("Welcome to LLMonade deployment CLI\n");
 
     const config = await this.getInteractiveConfig();
 
-    console.log("\n📋 Deployment Summary:");
-    console.log(`👤 AWS Profile: ${config.awsProfile}`);
-    console.log(`🌎 AWS Region: ${config.region}`);
-    console.log(`📍 Availability Zones: ${config.availabilityZones.join(", ")}`);
-    console.log(`📱 App Name: ${config.appName}`);
-    console.log(`🔐 Cognito Domain: ${config.cognitoDomain}`);
-    console.log(`🌐 Cognito Redirect URIs: ${(config.cognitoRedirectUris || []).join(", ")}`);
-    console.log(`👥 Self Signup: ${config.allowSelfSignup ? "Enabled" : "Disabled"}`);
-    console.log(`🔑 API Keys: OpenAI ✓, Phoenix ✓`);
-    console.log(`⚡ Lambda: Database Creation, Project Management (Node.js 22.x)`);
-    console.log(`🌍 Frontend: S3 + CloudFront Distribution`);
-    console.log(`🔌 API: API Gateway with Cognito Authorization`);
+    // console.log("\n📋 Deployment Summary:");
+    // console.log(`👤 AWS Profile: ${config.awsProfile}`);
+    // console.log(`🌎 AWS Region: ${config.region}`);
+    // console.log(`📍 Availability Zones: ${config.availabilityZones.join(", ")}`);
+    // console.log(`📱 App Name: ${config.appName}`);
+    // console.log(`🔐 Cognito Domain: ${config.cognitoDomain}`);
+    // console.log(`🌐 Cognito Redirect URIs: ${(config.cognitoRedirectUris || []).join(", ")}`);
+    // console.log(`👥 Self Signup: ${config.allowSelfSignup ? "Enabled" : "Disabled"}`);
+    // console.log(`🔑 API Keys: OpenAI ✓, Phoenix ✓`);
+    // console.log(`⚡ Lambda: Database Creation, Project Management (Node.js 22.x)`);
+    // console.log(`🌍 Frontend: S3 + CloudFront Distribution`);
+    // console.log(`🔌 API: API Gateway with Cognito Authorization`);
 
     const proceed = await inquirer.prompt([
       {
@@ -872,7 +908,7 @@ class DeploymentCLI {
   }
 
   private async getInteractiveConfig(): Promise<DeploymentConfig> {
-    console.log("📝 Let's configure your Error Analysis App deployment:\n");
+    console.log("Let's configure your LLMonade deployment:\n");
 
     // Get available AWS profiles
     const availableProfiles = await this.getAvailableProfiles();
@@ -892,8 +928,6 @@ class DeploymentCLI {
     // Get detected region
     const detectedRegion = await this.getProfileRegion(profileAnswer.awsProfile);
     
-    console.log(`\n🌎 Detected region: ${detectedRegion}`);
-
     const restOfAnswers = await inquirer.prompt([
       {
         type: "input",
@@ -920,9 +954,8 @@ class DeploymentCLI {
     ]);
 
     // Get availability zones for the selected region
-    console.log(`\n🔍 Fetching availability zones for ${restOfAnswers.region}...`);
     const availableZones = await this.getAvailableAvailabilityZones(profileAnswer.awsProfile, restOfAnswers.region);
-    console.log(`📍 Available availability zones: ${availableZones.join(', ')}`);
+    // console.log(`Available availability zones: ${availableZones.join(', ')}`);
 
     const availabilityZoneAnswers = await inquirer.prompt([
       {
