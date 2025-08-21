@@ -1,2 +1,7 @@
 node_modules/
 cli-inputs.txt
+.env
+cli-inputs-new.txt
+temp.ts
+config.js
+cdk.out

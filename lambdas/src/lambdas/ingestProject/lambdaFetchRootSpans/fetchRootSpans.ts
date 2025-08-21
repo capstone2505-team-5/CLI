@@ -13,7 +13,7 @@ const fetchProject = async (api_key: string, projectName: string, lastCursor: st
         edges {
           node {
             id
-            spans(rootSpansOnly: true, first: 500, after: $lastCursor) {
+            spans(rootSpansOnly: true, first: 2000, after: $lastCursor) {
               edges {
                 node {
                   context {

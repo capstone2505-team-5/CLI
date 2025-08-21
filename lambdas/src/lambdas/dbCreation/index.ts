@@ -37,6 +37,7 @@ export const handler = async () => {
         id VARCHAR(50) PRIMARY KEY,
         project_id VARCHAR(50) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
+        formatted_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW()
       );
 
@@ -50,7 +51,11 @@ export const handler = async () => {
         span_name VARCHAR(50) NOT NULL,
         start_time TIMESTAMP NOT NULL,
         end_time TIMESTAMP NOT NULL,
-        created_at TIMESTAMP DEFAULT NOW()
+        created_at TIMESTAMP DEFAULT NOW(),
+        formatted_input TEXT,
+        formatted_output TEXT,
+        formatting_status VARCHAR(20) DEFAULT 'pending',
+        formatted_at TIMESTAMP
       );  
 
       CREATE TABLE IF NOT EXISTS annotations (
@@ -78,11 +83,7 @@ export const handler = async () => {
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ 
-        message: 'Database tables dropped and recreated successfully',
-        timestamp: new Date().toISOString(),
-        tablesCreated: ['projects', 'batches', 'root_spans', 'annotations', 'categories', 'annotation_categories']
-      }),
+      body: JSON.stringify({ message: 'Database tables dropped and recreated successfully' }),
       headers: {
         'Content-Type': 'application/json',
       },

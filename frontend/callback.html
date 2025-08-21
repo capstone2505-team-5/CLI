@@ -1,0 +1,28 @@
+<!-- callback.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Logging In...</title>
+  <script>
+    (function () {
+      const hash = window.location.hash.substring(1);
+      const params = new URLSearchParams(hash);
+      const idToken = params.get('id_token');
+
+      if (idToken) {
+        // Store token in a secure cookie
+        document.cookie = `id_token=${idToken}; path=/; Secure; SameSite=Lax`;
+
+        // Redirect to home or original destination
+        window.location.replace('/');
+      } else {
+        document.body.innerHTML = '<h2>Login failed or canceled. Please try again.</h2>';
+      }
+    })();
+  </script>
+</head>
+<body>
+  <h2>Redirecting...</h2>
+</body>
+</html>
