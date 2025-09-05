@@ -4,7 +4,7 @@ A streamlined deployment solution for error analysis applications on AWS infrast
 
 ## Overview
 
-This deployment tool creates a secure, production-ready serverless environment for error analysis applications with:
+This deployment tool creates a secure, production-ready serverless environment for manual error analysis with:
 
 - **Lambda Functions**: Serverless compute for data processing and API endpoints
 - **RDS PostgreSQL**: Managed database with automated backups
